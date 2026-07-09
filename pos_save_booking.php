@@ -105,15 +105,17 @@ try {
                     if ($typeRow['sub_label']) $ticketTypeLabel .= ' ' . $typeRow['sub_label'];
                 }
             } elseif ($itemType === 'bundle') {
-                // For family package bundle, generate 2 adult + 2 kids tickets
+                // For family package bundle, generate 2 adult + 2 kids tickets.
+                // Ang label ay may "Family Package" para makilala ng gate
+                // (gate_family_barcode_by_label -> FAMPKADT / FAMPKKID).
                 for ($i = 0; $i < 2; $i++) {
                     $code = $bookingId . '-' . str_pad($ticketSeq, 2, '0', STR_PAD_LEFT) . '-' . strtoupper(substr(bin2hex(random_bytes(2)), 0, 3));
-                    $stmtTicket->execute([$bookingId, $code, 'Adult']);
+                    $stmtTicket->execute([$bookingId, $code, 'Family Package - Adult']);
                     $ticketSeq++;
                 }
                 for ($i = 0; $i < 2; $i++) {
                     $code = $bookingId . '-' . str_pad($ticketSeq, 2, '0', STR_PAD_LEFT) . '-' . strtoupper(substr(bin2hex(random_bytes(2)), 0, 3));
-                    $stmtTicket->execute([$bookingId, $code, 'Kids']);
+                    $stmtTicket->execute([$bookingId, $code, 'Family Package - Kids']);
                     $ticketSeq++;
                 }
                 // Track combo meals from bundle (4 included)
@@ -166,6 +168,13 @@ try {
     ]);
 
     $pdo->commit();
+
+    // --- Sync sa turnstile gate (ligtas/inert hangga't walang GATE_AUTH_KEY) ---
+    // Walk-in POS bookings ay 'paid' agad, kaya i-push sa gate para lumabas
+    // din sila sa turnstile (dati online/kiosk lang ang naka-wire).
+    try { require_once __DIR__ . '/gate_sync.php'; gate_push_booking($pdo, (int)$bookingId); }
+    catch (\Throwable $e) { @error_log('gate_push_booking failed (POS): ' . $e->getMessage()); }
+
     echo json_encode(['success' => true, 'booking_id' => $bookingId]);
 
 } catch (Exception $e) {

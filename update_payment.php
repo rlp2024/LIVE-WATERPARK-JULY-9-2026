@@ -18,19 +18,59 @@ if (isset($_GET['booking_id'])) {
     $processed_by = isset($_GET['processed_by']) ? $_GET['processed_by'] : $admin_name;
 
     try {
-        $pdo->beginTransaction();
-
         // 1. I-update ang payment_status para maging 'paid' AT i-save ang name ng nag-process sa 'cashier_name'
         $stmtUpdate = $pdo->prepare("UPDATE bookings SET payment_status = 'paid', cashier_name = ? WHERE booking_id = ?");
         $stmtUpdate->execute([$processed_by, $booking_id]);
 
-        // 2. Kunin ang booking details para sa email
+        // 2. I-send AGAD ang response sa cashier - huwag nang antayin ang gate
+        //    push at email (dati dito nade-delay ang "Accept Cash" hanggang
+        //    matapos ang mabagal na email send / gate curl call)
+        if (isset($_GET['ajax'])) {
+            echo json_encode([
+                'status' => 'success',
+                'message' => 'Payment processed and email sent.',
+                'booking_id' => $booking_id
+            ]);
+        } else {
+            header("Location: admin_dashboard.php?view=sales&msg=" . urlencode("Payment received for Booking #$booking_id"));
+        }
+
+        // I-release ang session lock + i-flush ang response bago ang mabibigat
+        // na background work (gate push + SMTP email).
+        @session_write_close();
+        if (function_exists('fastcgi_finish_request')) {
+            fastcgi_finish_request();
+        } else {
+            ignore_user_abort(true);
+            @ob_end_flush();
+            @flush();
+        }
+
+    } catch (Exception $e) {
+        // Error BAGO pa masend ang response (hal. DB update fail).
+        if (isset($_GET['ajax'])) {
+            echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+            exit;
+        }
+        die("System Error: " . $e->getMessage());
+    }
+
+    // --- Pagkatapos makarating ang response: gate push + email (background) ---
+    // Isolated try/catch para HINDI masira ang naipadalang JSON kung sakaling
+    // mag-error ang gate o email.
+    try {
+        require_once __DIR__ . '/gate_sync.php';
+        gate_push_booking($pdo, (int)$booking_id);
+    } catch (\Throwable $e) {
+        @error_log('gate_push_booking failed: ' . $e->getMessage());
+    }
+
+    try {
         $stmtBook = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
         $stmtBook->execute([$booking_id]);
         $booking = $stmtBook->fetch(PDO::FETCH_ASSOC);
 
         if ($booking) {
-            // 3. Kunin ang mga items na binili
             $stmtItems = $pdo->prepare("SELECT product_id, quantity, price_per_item as price FROM booking_items WHERE booking_id = ?");
             $stmtItems->execute([$booking_id]);
             $rawItems = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
@@ -65,40 +105,18 @@ if (isset($_GET['booking_id'])) {
                 ];
             }
 
-            // 4. I-send ang Email Receipt!
-            // Kapag Annual Pass, Confirmation ang ise-send. Kung normal tickets, Entry Receipt na may pangalan ng Cashier.
+            // I-send ang Email Receipt (Annual Pass -> Confirmation; normal -> Entry Receipt).
             if (!empty($booking['expiry_date'])) {
                 sendBookingConfirmation($booking['customer_email'], $booking['customer_name'], $booking_id, $booking, $items);
             } else {
                 sendEntryReceipt($booking['customer_email'], $booking['customer_name'], $booking_id, $booking, $items, $processed_by);
             }
         }
-
-        $pdo->commit();
-
-        // BAGONG LOGIC: Check kung AJAX request
-        if (isset($_GET['ajax'])) {
-            echo json_encode([
-                'status' => 'success',
-                'message' => 'Payment processed and email sent.',
-                'booking_id' => $booking_id
-            ]);
-            exit;
-        }
-
-        // Fallback for non-ajax requests
-        header("Location: admin_dashboard.php?view=sales&msg=" . urlencode("Payment received for Booking #$booking_id"));
-        exit;
-
-    } catch (Exception $e) {
-        if ($pdo->inTransaction()) $pdo->rollBack();
-        
-        if (isset($_GET['ajax'])) {
-            echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
-            exit;
-        }
-        die("System Error: " . $e->getMessage());
+    } catch (\Throwable $e) {
+        @error_log('update_payment post-response email failed: ' . $e->getMessage());
     }
+
+    exit;
 } else {
     die("Invalid request.");
 }
