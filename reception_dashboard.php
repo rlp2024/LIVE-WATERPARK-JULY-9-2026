@@ -2170,76 +2170,57 @@ td{ padding:15px; border-bottom:1px solid #f0f0f0; vertical-align:middle; font-s
         }
 
         function printQRCard(qrCode, custName, walletId) {
-            const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent(qrCode);
-            const printWindow = window.open('', '_blank', 'width=600,height=400');
-            printWindow.document.write(`
-                <html>
-                <head>
-                    <title>Print QR Card - ${custName}</title>
-                    <style>
-                        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #fff; }
-                        .id-card { width: 85.6mm; height: 53.98mm; border: 1px solid #ccc; border-radius: 8px; background: linear-gradient(135deg, #ffffff, #e0f2fe); padding: 4mm; box-sizing: border-box; position: relative; display: flex; flex-direction: row; align-items: center; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                        .card-left { flex: 1.2; text-align: center; }
-                        .card-right { flex: 1; text-align: center; border-left: 2px dashed #0ea5e9; padding-left: 3mm; }
-                        .card-logo { width: 35mm; height: auto; margin-bottom: 2mm; }
-                        .card-title { color: #0ea5e9; font-size: 10px; font-weight: 900; letter-spacing: 1px; margin: 0 0 3mm 0; text-transform: uppercase; }
-                        .cust-name { font-size: 13px; font-weight: bold; color: #003B72; margin: 0; text-transform: uppercase; line-height: 1.1; }
-                        .wallet-id { font-size: 9px; color: #666; margin-top: 1mm; font-weight: bold; }
-                        .qr-img { width: 30mm; height: 30mm; object-fit: contain; }
-                        .scan-text { font-size: 8px; color: #003B72; margin-top: 1mm; font-weight: bold; }
-                        @media print {
-                            @page { size: 85.6mm 53.98mm; margin: 0; }
-                            body { -webkit-print-color-adjust: exact; print-color-adjust: exact; background: transparent; }
-                            .id-card { border: none; }
-                        }
-                    </style>
-                </head>
-                <body>
-                    <div class="id-card">
-                        <div class="card-left">
-                            <img src="../Images/awpemaillogo.png" alt="Logo" class="card-logo" onerror="this.style.display='none'">
-                            <h3 class="card-title">QR Wallet Card</h3>
-                            <p class="cust-name">${custName}</p>
-                            <p class="wallet-id">ID: W-${walletId}</p>
-                        </div>
-                        <div class="card-right">
-                            <img src="${qrUrl}" class="qr-img" alt="QR Code">
-                            <div class="scan-text">SCAN TO PAY</div>
-                        </div>
-                    </div>
-                    <script>setTimeout(() => { window.print(); }, 800);<\/script>
-                </body>
-                </html>
-            `);
+            var qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qrCode);
+            var printWindow = window.open('', '_blank', 'width=600,height=400');
+            var h = '<html><head><title>Print QR Card - ' + custName + '</title>';
+            h += '<style>body{font-family:Segoe UI,Tahoma,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#fff}';
+            h += '.id-card{width:85.6mm;height:53.98mm;border:1px solid #ccc;border-radius:8px;background:linear-gradient(135deg,#fff,#e0f2fe);padding:4mm;box-sizing:border-box;display:flex;flex-direction:row;align-items:center;-webkit-print-color-adjust:exact;print-color-adjust:exact}';
+            h += '.card-left{flex:1.2;text-align:center}.card-right{flex:1;text-align:center;border-left:2px dashed #0ea5e9;padding-left:3mm}';
+            h += '.card-logo{width:35mm;height:auto;margin-bottom:2mm}.card-title{color:#0ea5e9;font-size:10px;font-weight:900;letter-spacing:1px;margin:0 0 3mm 0;text-transform:uppercase}';
+            h += '.cust-name{font-size:13px;font-weight:bold;color:#003B72;margin:0;text-transform:uppercase;line-height:1.1}';
+            h += '.wallet-id{font-size:9px;color:#666;margin-top:1mm;font-weight:bold}.qr-img{width:30mm;height:30mm;object-fit:contain}';
+            h += '.scan-text{font-size:8px;color:#003B72;margin-top:1mm;font-weight:bold}';
+            h += '@media print{@page{size:85.6mm 53.98mm;margin:0}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;background:transparent}.id-card{border:none}}';
+            h += '</style></head><body>';
+            h += '<div class="id-card"><div class="card-left">';
+            h += '<img src="../Images/awpemaillogo.png" alt="Logo" class="card-logo" onerror="this.style.display=none">';
+            h += '<h3 class="card-title">QR Wallet Card</h3>';
+            h += '<p class="cust-name">' + custName + '</p>';
+            h += '<p class="wallet-id">ID: W-' + walletId + '</p></div>';
+            h += '<div class="card-right"><img src="' + qrUrl + '" class="qr-img" alt="QR Code">';
+            h += '<div class="scan-text">SCAN TO PAY</div></div></div>';
+            h += '</body></html>';
+            printWindow.document.write(h);
             printWindow.document.close();
+            setTimeout(function() { printWindow.print(); }, 800);
         }
 
         function downloadQRCard(qrCode, custName, walletId) {
-            const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent(qrCode);
-            const container = document.createElement('div');
-            container.style.position = 'absolute'; container.style.left = '-9999px'; container.style.top = '-9999px';
-            container.innerHTML = `
-                <div id="temp-id-card" style="width: 324px; height: 204px; border: 1px solid #ccc; border-radius: 8px; background: linear-gradient(135deg, #ffffff, #e0f2fe); padding: 15px; box-sizing: border-box; display: flex; flex-direction: row; align-items: center; font-family: 'Segoe UI', Tahoma, sans-serif;">
-                    <div style="flex: 1.2; text-align: center;">
-                        <img src="Images/awpemaillogo.png" style="width: 120px; height: auto; margin-bottom: 8px;" onerror="this.style.display='none'">
-                        <h3 style="color: #0ea5e9; font-size: 12px; font-weight: 900; letter-spacing: 1px; margin: 0 0 10px 0; text-transform: uppercase;">QR Wallet Card</h3>
-                        <p style="font-size: 16px; font-weight: bold; color: #003B72; margin: 0; text-transform: uppercase; line-height: 1.1;">${custName}</p>
-                        <p style="font-size: 11px; color: #666; margin-top: 5px; font-weight: bold;">ID: W-${walletId}</p>
-                    </div>
-                    <div style="flex: 1; text-align: center; border-left: 2px dashed #0ea5e9; padding-left: 10px;">
-                        <img src="${qrUrl}" crossorigin="anonymous" style="width: 100px; height: 100px; object-fit: contain;">
-                        <div style="font-size: 10px; color: #003B72; margin-top: 5px; font-weight: bold;">SCAN TO PAY</div>
-                    </div>
-                </div>
-            `;
+            var qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qrCode);
+            var container = document.createElement('div');
+            container.style.cssText = 'position:fixed;left:-9999px;top:-9999px;pointer-events:none;z-index:-1;opacity:0;';
+            container.innerHTML = '<div id="temp-id-card" style="width:324px;height:204px;border:1px solid #ccc;border-radius:8px;background:linear-gradient(135deg,#fff,#e0f2fe);padding:15px;box-sizing:border-box;display:flex;flex-direction:row;align-items:center;font-family:Segoe UI,Tahoma,sans-serif;">'
+                + '<div style="flex:1.2;text-align:center;">'
+                + '<img src="Images/awpemaillogo.png" style="width:120px;height:auto;margin-bottom:8px;" onerror="this.style.display=none">'
+                + '<h3 style="color:#0ea5e9;font-size:12px;font-weight:900;letter-spacing:1px;margin:0 0 10px 0;text-transform:uppercase;">QR Wallet Card</h3>'
+                + '<p style="font-size:16px;font-weight:bold;color:#003B72;margin:0;text-transform:uppercase;line-height:1.1;">' + custName + '</p>'
+                + '<p style="font-size:11px;color:#666;margin-top:5px;font-weight:bold;">ID: W-' + walletId + '</p>'
+                + '</div>'
+                + '<div style="flex:1;text-align:center;border-left:2px dashed #0ea5e9;padding-left:10px;">'
+                + '<img src="' + qrUrl + '" crossorigin="anonymous" style="width:100px;height:100px;object-fit:contain;">'
+                + '<div style="font-size:10px;color:#003B72;margin-top:5px;font-weight:bold;">SCAN TO PAY</div>'
+                + '</div></div>';
             document.body.appendChild(container);
-            setTimeout(() => {
-                html2canvas(document.getElementById('temp-id-card'), { useCORS: true, scale: 2, backgroundColor: null }).then(canvas => {
-                    const link = document.createElement('a');
-                    link.download = `QR_Wallet_${custName.replace(/\s+/g, '_')}.png`;
-                    link.href = canvas.toDataURL('image/png'); link.click();
-                    document.body.removeChild(container);
-                });
+            setTimeout(function() {
+                try {
+                    html2canvas(document.getElementById('temp-id-card'), { useCORS: true, scale: 2, backgroundColor: null }).then(function(canvas) {
+                        var link = document.createElement('a');
+                        link.download = 'QR_Wallet_' + custName.replace(/\s+/g, '_') + '.png';
+                        link.href = canvas.toDataURL('image/png');
+                        link.click();
+                        if (container.parentNode) document.body.removeChild(container);
+                    }).catch(function() { if (container.parentNode) document.body.removeChild(container); });
+                } catch(e) { if (container.parentNode) document.body.removeChild(container); }
             }, 600);
         }
 
