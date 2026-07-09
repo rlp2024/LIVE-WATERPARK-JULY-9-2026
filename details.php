@@ -1,0 +1,843 @@
+<?php
+// details.php - FIXED VERSION
+session_start();
+include_once 'db_connect.php';
+
+// =========================================================
+// HELPER FUNCTION PARA SA ICONS (FIXED LOGIC)
+// =========================================================
+function getSummaryIcon($name) {
+    $n = strtolower($name);
+    // Ticket Types (Gamit ang strpos para mahanap ang "Adult" sa "Adult(Above 1.1m)")
+    if (strpos($n, 'adult') !== false || strpos($n, 'standard') !== false) return 'fa-user';
+    if (strpos($n, 'child') !== false)  return 'fa-child';
+    if (strpos($n, 'infant') !== false) return 'fa-baby';
+    
+    // Annual Pass
+    if (strpos($n, 'annual') !== false) return 'fa-id-card';
+
+    // Add-ons keywords
+    if (strpos($n, 'parking') !== false) return 'fa-square-parking';
+    if (strpos($n, 'locker') !== false)  return 'fa-lock';
+    if (strpos($n, 'meal') !== false)    return 'fa-utensils';
+    if (strpos($n, 'photo') !== false)   return 'fa-camera';
+    if (strpos($n, 'zipline') !== false) return 'fa-wind';
+    if (strpos($n, 'bridge') !== false)  return 'fa-bridge-water';
+
+    // Default icon pag walang match
+    return 'fa-ticket';
+}
+
+// ---------------------------------------------------------
+// 1. ANNUAL PASS / DIRECT BUY LOGIC
+// ---------------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] == 'buy_pass' && isset($_GET['id'])) {
+    
+    $id = $_GET['id'];
+    
+    $stmt = $pdo->prepare("SELECT product_id, name, price, image_url FROM products WHERE product_id = ?");
+    $stmt->execute([$id]);
+    $prod = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($prod) {
+        $_SESSION['cart'] = []; 
+        $_SESSION['cart']['prod_'.$id] = [
+            'id' => $id,
+            'name' => $prod['name'],
+            'price' => $prod['price'],
+            'quantity' => 1,
+            'subtotal' => $prod['price'],
+        ];
+        
+        $_SESSION['total_price'] = $prod['price'];
+        
+        $today = date('Y-m-d');
+        $_SESSION['booking_date'] = $today; 
+        $_SESSION['expiry_date'] = date('Y-m-d', strtotime('+1 year')); 
+        
+        $_SESSION['is_annual_pass'] = true; 
+    }
+}
+
+// ---------------------------------------------------------
+// 2. NORMAL BOOKING LOGIC (FIXED LOGIC HERE)
+// ---------------------------------------------------------
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['tickets'])) {
+    $cart = [];
+    $total_price = 0;
+    $has_adult = false;
+
+    if(isset($_POST['booking_date']) && !empty($_POST['booking_date'])) {
+        $_SESSION['booking_date'] = $_POST['booking_date'];
+    } else {
+        $_SESSION['booking_date'] = date('Y-m-d');
+    }
+
+    foreach ($_POST['tickets'] as $id => $qty) {
+        $qty = (int)$qty;
+        if ($qty <= 0) continue; 
+
+        $stmt = $pdo->prepare("
+            SELECT t.type_id, t.price, t.category, t.sub_label, p.product_id, p.name AS package_name
+            FROM ticket_types t 
+            JOIN products p ON t.product_id = p.product_id 
+            WHERE t.type_id = ?
+        ");
+        $stmt->execute([$id]);
+        $ticketVar = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($ticketVar) {
+            // --- FIX: Check if category contains 'adult' ---
+            $catName = strtolower($ticketVar['category']);
+            if (strpos($catName, 'adult') !== false || $catName === 'standard') {
+                $has_adult = true;
+            }
+            
+            // --- FIX: Build full name = "Category w/ Sub-label" (e.g. "Kids w/ Meal") ---
+            $sub = !empty($ticketVar['sub_label']) ? ' ' . $ticketVar['sub_label'] : '';
+            $displayName = trim($ticketVar['category'] . $sub);
+
+            $cartItem = [
+                'id' => 'type_' . $ticketVar['type_id'],
+                'name' => $displayName,
+                'price' => $ticketVar['price'],
+                'quantity' => $qty,
+                'subtotal' => $ticketVar['price'] * $qty,
+            ];
+            
+            $cart['type_' . $id] = $cartItem;
+            $total_price += $cartItem['subtotal'];
+            
+        } else {
+            $stmt2 = $pdo->prepare("SELECT product_id, name, price FROM products WHERE product_id = ?");
+            $stmt2->execute([$id]);
+            $prod = $stmt2->fetch(PDO::FETCH_ASSOC);
+
+            if ($prod) {
+                // --- FIX: Check din kung adult ticket ang product name ---
+                $prodNameLower = strtolower($prod['name']);
+                if (strpos($prodNameLower, 'adult') !== false || strpos($prodNameLower, 'standard') !== false) {
+                    $has_adult = true;
+                }
+
+                $cartItem = [
+                    'id' => 'prod_' . $prod['product_id'],
+                    'name' => $prod['name'], 
+                    'price' => $prod['price'],
+                    'quantity' => $qty,
+                    'subtotal' => $prod['price'] * $qty,
+                ];
+
+                $cart['prod_' . $id] = $cartItem;
+                $total_price += $cartItem['subtotal'];
+            }
+        }
+    }
+
+    // Adult requirement REMOVED — pwede na mag-book kahit kids/infant lang
+
+    
+    $_SESSION['cart'] = $cart;
+    $_SESSION['total_price'] = $total_price;
+    
+    unset($_SESSION['expiry_date']);
+    unset($_SESSION['is_annual_pass']);
+}
+
+// ---------------------------------------------------------
+// 3. FINAL CHECKS
+// ---------------------------------------------------------
+
+if (empty($_SESSION['cart'])) { 
+    header('Location: book.php'); 
+    exit; 
+}
+
+$is_kiosk = isset($_SESSION['kiosk_mode']) && $_SESSION['kiosk_mode'];
+
+if (!$is_kiosk) {
+    include_once 'header.php';
+}
+
+$isAnnualPassTransaction = isset($_SESSION['is_annual_pass']) && $_SESSION['is_annual_pass'];
+?>
+
+<link rel="stylesheet" href="booking-style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/css/intlTelInput.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+<!-- jQuery (Required for Select2) -->
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
+<!-- Select2 CSS & JS -->
+<link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+
+<style>
+    /* Select2 Custom Styling */
+.select2-container--default .select2-selection--single {
+    height: 45px; /* Kapareho ng height ng .ww-input */
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+}
+
+.select2-container--default .select2-selection--single .select2-selection__arrow {
+    height: 45px;
+}
+
+.select2-container {
+    width: 100% !important; /* Siguradong full width */
+    margin-bottom: 15px;
+}
+
+.select2-dropdown {
+    border: 1px solid #003B72;
+    border-radius: 6px;
+    z-index: 9999;
+}
+    /* Ayusin ang width ng bagong phone plugin */
+.iti { 
+    width: 100%; 
+}
+.iti__flag {background-image: url("https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/img/flags.png");}
+@media (min-resolution: 2x) {
+  .iti__flag {background-image: url("https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/img/flags@2x.png");}
+}
+    /* Kiosk Top Bar */
+    .kiosk-top-bar { padding: 20px 5%; background-color: #fff; border-bottom: 1px solid #ddd; margin-bottom: 20px; display: flex; justify-content: center; align-items: center; }
+    .kiosk-back-btn { display: inline-flex; align-items: center; gap: 10px; background-color: #333; color: #fff; padding: 15px 30px; border-radius: 50px; text-decoration: none; font-size: 1.2rem; font-weight: bold; transition: background 0.3s; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .kiosk-back-btn:hover { background-color: #000; transform: translateY(-2px); }
+    .kiosk-back-btn span { font-size: 1.5rem; line-height: 1; }
+
+    /* Camera & Face UI */
+    #camera-container { display: none; text-align: center; margin-top: 15px; background: #000; padding: 10px; border-radius: 10px; position: relative; overflow: hidden; }
+    #video { width: 100%; max-width: 400px; border-radius: 10px; transform: scaleX(-1); display: block; margin: 0 auto; }
+    #ai-canvas { position: absolute; top: 10px; left: 50%; transform: translateX(-50%) scaleX(-1); pointer-events: none; }
+    
+    #captured-photo { display: none; width: 100%; max-width: 200px; border-radius: 10px; border: 3px solid #28a745; margin: 15px auto; transform: scaleX(-1); box-shadow: 0 4px 10px rgba(0,0,0,0.2); }
+    
+    .btn-cam-ctrl { padding: 12px 25px; border-radius: 6px; cursor: pointer; border: none; font-weight: bold; margin-top: 10px; font-size: 0.9rem; width: 100%; max-width: 300px; }
+    .btn-start { background: #003B72; color: white; display: block; margin: 0 auto; }
+    .btn-start:hover { background: #002855; }
+    
+    .btn-snap { background: #ccc; color: #666; pointer-events: none; transition: 0.3s; display: block; margin: 10px auto; }
+    .btn-snap.active { background: #ffc107; color: #333; pointer-events: auto; cursor: pointer; box-shadow: 0 4px 10px rgba(255, 193, 7, 0.4); }
+    .btn-snap.active:hover { background: #e0a800; }
+    
+    .btn-retake { background: #dc3545; color: white; display: none; margin: 10px auto; }
+    .btn-retake:hover { background: #c82333; }
+
+    #face-status { font-weight: bold; margin-top: 10px; font-size: 0.9rem; text-align: center; }
+    .status-searching { color: orange; }
+    .status-found { color: #28a745; }
+
+    /* Footer Fixes */
+    .ww-footer-right { display: flex; align-items: center; gap: 15px; }
+    .ww-next-btn { white-space: nowrap; }
+
+    /* NEW STYLE FOR SUMMARY ICONS */
+    .summary-icon-box {
+        width: 50px; height: 50px; flex-shrink: 0; margin-right: 15px;
+        border-radius: 12px; background-color: #f0f4f8; color: #003B72;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.5rem;
+    }
+
+    /* Agreements Section Box */
+    .agreements-box {
+        background: #f8faff;
+        border: 1px solid #d0deea;
+        padding: 20px;
+        border-radius: 10px;
+        margin-top: 25px;
+    }
+    .agreement-item {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        margin-bottom: 15px;
+    }
+    .agreement-item:last-child {
+        margin-bottom: 0;
+    }
+    .agreement-item input[type="checkbox"] {
+        width: 22px;
+        height: 22px;
+        cursor: pointer;
+        margin-top: 2px;
+        flex-shrink: 0;
+    }
+    .agreement-item label {
+        font-size: 0.9rem;
+        color: #444;
+        margin: 0;
+        line-height: 1.5;
+        cursor: pointer;
+    }
+    /* Modal Styles for Terms & Conditions */
+    .modal-overlay {
+        display: none; 
+        position: fixed; 
+        z-index: 9999; 
+        left: 0; 
+        top: 0;
+        width: 100%; 
+        height: 100%; 
+        background-color: rgba(0,0,0,0.6);
+        align-items: center; 
+        justify-content: center;
+    }
+    .modal-box {
+        background-color: #fff; 
+        padding: 25px; 
+        border-radius: 12px;
+        width: 90%; 
+        max-width: 500px; 
+        position: relative;
+        box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        animation: fadeIn 0.3s ease-in-out;
+    }
+    .modal-close {
+        position: absolute; 
+        top: 15px; 
+        right: 20px; 
+        font-size: 1.5rem;
+        cursor: pointer; 
+        color: #666;
+        transition: color 0.2s;
+    }
+    .modal-close:hover { color: #d9534f; }
+    .terms-list { 
+        line-height: 1.6; 
+        color: #444; 
+        margin-top: 15px; 
+        padding-left: 20px; 
+        font-size: 0.95rem;
+    }
+    .terms-list li { margin-bottom: 12px; }
+    
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+</style>
+
+<main>
+    <?php if ($is_kiosk): ?>
+        <div class="kiosk-top-bar">
+            <a href="kiosk_home.php" class="kiosk-back-btn">
+                <span>&#8592;</span> Back to Home
+            </a>
+        </div>
+    <?php endif; ?>
+
+    <form action="checkout.php" method="POST" id="detailsForm">
+        <input type="hidden" name="face_image" id="face_image_input">
+
+        <div class="booking-wrapper">
+            <div class="booking-container">
+       
+       
+            <div class="booking-main">
+                    <div class="ww-main-card" style="display:block;"> 
+                        <h2 style="margin-bottom:20px; color:#003B72;">Guest Details</h2>
+                        
+                        <div class="ww-form-group">
+                            <div style="margin-bottom: 15px;">
+    <input type="tel" name="phone" id="input_cust_phone" placeholder="Phone Number (e.g. +971501234567)" required class="ww-input" style="width: 100%;">
+    <div id="autofill-loading" style="display: none; font-size: 0.85rem; color: #003B72; font-weight: bold; margin-top: 5px;">
+        <i class="fas fa-spinner fa-spin"></i> Searching existing customer...
+    </div>
+</div>
+
+                            <div style="display:flex; gap:15px; margin-bottom: 15px;">
+                                <input type="text" name="first_name" placeholder="First Name" required class="ww-input">
+                                <input type="text" name="last_name" placeholder="Last Name" required class="ww-input">
+                            </div>
+                            
+                            <input type="email" name="email" placeholder="Email Address" required class="ww-input" style="margin-bottom: 15px;">
+
+                            <input type="text" name="company_name" placeholder="Company Name" class="ww-input" style="margin-bottom: 15px;">
+
+<select name="country" id="country_select" class="ww-input" required style="margin-bottom: 15px;">
+                                <option value="">Select Nationality / Country</option>
+                            </select>
+                        <div style="display:flex; align-items:center; gap:20px; margin-top:10px;">
+                            <h2 style="margin:0; color:#003B72;">Are You?</h2>
+
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="radio" name="are_you" value="visitor" required>
+                                Visitor
+                            </label>
+
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="radio" name="are_you" value="residence">
+                                Residence
+                            </label>
+                        </div>
+            <?php if ($isAnnualPassTransaction): ?>
+                            <div style="margin-top: 25px; padding: 20px; background: #f8faff; border: 2px dashed #003B72; border-radius: 12px; text-align: center;">
+                                <h3 style="color:#003B72; margin-top:0; margin-bottom: 5px;"><i class="fas fa-id-card-alt"></i> Membership Photo</h3>
+                                <p style="font-size:0.9rem; color:#666; margin-bottom: 15px;">Required. Please position your face clearly.</p>
+
+                                <button type="button" class="btn-cam-ctrl btn-start" id="startCamBtn" onclick="startCamera()">
+                                    <i class="fas fa-camera"></i> Open Camera
+                                </button>
+
+                                <div id="camera-container">
+                                    <video id="video" autoplay playsinline muted></video>
+                                    <canvas id="ai-canvas"></canvas>
+                                    
+                                    <div id="face-status" class="status-searching">Initializing AI...</div>
+                                    <button type="button" class="btn-cam-ctrl btn-snap" id="snapBtn" onclick="takeSnapshot()">
+                                        NO FACE DETECTED
+                                    </button>
+                                </div>
+                                <canvas id="canvas" style="display:none;"></canvas>
+                                
+                                <img id="captured-photo" alt="My Photo">
+                                <button type="button" class="btn-cam-ctrl btn-retake" id="retakeBtn" onclick="retakePhoto()">
+                                    <i class="fas fa-redo"></i> Retake Photo
+                                </button>
+                            </div>
+                            <?php endif; ?>
+
+                            <div class="agreements-box">
+                                   <div class="agreement-item">
+    <input type="checkbox" required name="agree_terms" id="agree_terms">
+    <label for="agree_terms">
+        I have read and agree to the 
+        <a href="javascript:void(0);" onclick="openTermsModal()" style="color:#003B72; font-weight: bold; text-decoration: underline;">Terms & Conditions</a> 
+        and <a href="#" style="color:#003B72; font-weight: bold;">Privacy Policy</a>. I consent to the processing of my personal details and agree to abide by all Ajman Water Park safety rules and regulations during my visit.
+    </label>
+</div>
+
+                                <div class="agreement-item">
+                                    <input type="checkbox" required name="agree_refund" id="agree_refund">
+                                    <label for="agree_refund">
+                                        I acknowledge and accept the <strong style="color: #d9534f;">Strict No-Refund Policy</strong>. I understand that all ticket purchases are final and non-refundable. However, I am aware that I may contact customer support to rebook or change my visit date before the scheduled arrival.
+                                    </label>
+                                </div>
+                            </div>
+                            </div>
+                    </div>
+                </div>
+<div class="booking-sidebar">
+                    <div class="sidebar-box">
+                        <h4 style="color:#003B72; text-align:center; margin-top: 0;">BOOKING SUMMARY</h4>
+                        <p style="text-align:center; margin-bottom:15px; font-size: 0.10rem; color: #666;">
+                            Date: <strong style="color: #333;"><?php echo date("F d, Y", strtotime($_SESSION['booking_date'])); ?></strong>
+                        </p>
+                        <hr style="border:0; border-top:1px solid #eee; margin-bottom: 15px;">
+                        
+                        <?php if(isset($_SESSION['cart']) && !empty($_SESSION['cart'])): 
+                            foreach ($_SESSION['cart'] as $item): 
+                                // GET THE ICON CLASS BASED ON NAME
+                                $iconClass = getSummaryIcon($item['name']);
+                        ?>
+                            
+                            <div class="cart-item-row" style="display:flex; align-items:center; margin-bottom:15px; padding-bottom:15px; border-bottom:1px solid #f0f0f0;">
+                                
+                                <div class="summary-icon-box">
+                                    <i class="fa-solid <?php echo $iconClass; ?>"></i>
+                                </div>
+
+                                <div style="flex:1;">
+                                    <div style="font-weight:700; color:#333; line-height:1.3; font-size:1rem; margin-bottom: 4px;">
+                                        <?php echo htmlspecialchars($item['name']); ?>
+                                    </div>
+                                    <div style="font-size:0.85rem; color:#777;">
+                                        Qty: <strong><?php echo $item['quantity']; ?></strong>
+                                    </div>
+                                </div>
+                                <div style="font-weight:700; color:#003B72; font-size:1rem; text-align: right;">
+                                    AED <?php echo number_format($item['subtotal'], 2); ?>
+                                </div>
+                            </div>
+
+                        <?php endforeach; endif; ?>
+                        
+                        <div style="display:flex; justify-content:space-between; align-items: center; font-size:1.3rem; font-weight:800; color:#003B72; margin-top:20px; padding-top: 15px; border-top: 2px dashed #eee;">
+                            <span>TOTAL</span>
+                            <span>AED <?php echo number_format(isset($_SESSION['total_price']) ? $_SESSION['total_price'] : 0, 2); ?></span>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="ww-footer">
+            <div class="ww-footer-inner">
+                <div class="ww-footer-left">
+                    <span class="ww-total-lbl" style="font-size: 0.9rem; color: rgba(255,255,255,0.8);">Total Amount</span>
+                    <strong class="ww-total-val" style="font-size: 1.5rem;">AED <?php echo number_format(isset($_SESSION['total_price']) ? $_SESSION['total_price'] : 0, 2); ?></strong>
+                </div>
+                
+                <div class="ww-steps-container">
+    <div class="ww-step-circle"><i class="fas fa-check"></i></div>
+    <div class="ww-step-circle active">2</div>
+    <div class="ww-step-circle">3</div>
+</div>
+
+                <div class="ww-footer-right">
+                    <?php $back_link = ($is_kiosk && isset($_SESSION['is_annual_pass'])) ? 'kiosk_home.php' : 'book.php'; ?>
+                    
+                    <a href="<?php echo $back_link; ?>" class="ww-next-btn" style="background:transparent; border:1px solid rgba(255,255,255,0.5); color:white; padding: 12px 25px; text-decoration:none; display: inline-flex; align-items: center; justify-content: center;">
+                        BACK
+                    </a>
+                    
+                    <button type="submit" class="ww-next-btn" onclick="return validateForm()" style="padding: 12px 30px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;">
+                        CHECKOUT <i class="fas fa-chevron-right"></i>
+                    </button>
+                    
+                </div>
+            </div>
+        </div>
+    </form>
+    <div id="termsModal" class="modal-overlay" onclick="closeTermsOutside(event)">
+    <div class="modal-box">
+        <span class="modal-close" onclick="closeTermsModal()"><i class="fas fa-times"></i></span>
+        <h3 style="color:#003B72; margin-top: 0; border-bottom: 2px solid #f0f4f8; padding-bottom: 10px;">
+            <i class="fas fa-clipboard-list"></i> Terms and Conditions
+        </h3>
+        <ul class="terms-list">
+            <li><strong>1.</strong> It is strictly forbidden to bring food, drink or water from outside.</li>
+            <li><strong>2.</strong> It is forbidden for adults and children to wear cotton inside the pool.</li>
+            <li><strong>3.</strong> Do not walk around with wet clothes inside indoor stores or restaurants. Please seek assistance from the staff present.</li>
+        </ul>
+        <button type="button" onclick="closeTermsModal()" style="width: 100%; margin-top: 15px; background: #003B72; color: white; padding: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;">
+            I Understand
+        </button>
+    </div>
+</div>
+</main>
+
+
+<script>
+    const isAnnualPass = <?php echo json_encode($isAnnualPassTransaction); ?>;
+    let stream = null;
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas'); 
+    const photo = document.getElementById('captured-photo');
+    const faceInput = document.getElementById('face_image_input');
+    const cameraBox = document.getElementById('camera-container');
+    const startCamBtn = document.getElementById('startCamBtn');
+    const snapBtn = document.getElementById('snapBtn');
+    const retakeBtn = document.getElementById('retakeBtn');
+    const statusText = document.getElementById('face-status');
+    const aiCanvas = document.getElementById('ai-canvas');
+
+    let faceDetectionInterval;
+    let isFaceDetected = false;
+
+    // Load AI Models
+    async function loadModels() {
+        if(isAnnualPass) {
+            await faceapi.nets.tinyFaceDetector.loadFromUri('models');
+            statusText.innerText = "Camera Ready. Press Open Camera.";
+            statusText.style.color = "#555";
+        }
+    }
+    loadModels();
+
+    async function startCamera() {
+        if(!isAnnualPass) return;
+        
+        startCamBtn.style.display = 'none';
+        cameraBox.style.display = 'block';
+        statusText.innerText = "Starting Camera...";
+
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: {} });
+            video.srcObject = stream;
+            
+            video.onloadedmetadata = () => {
+                video.play();
+                startFaceDetection();
+            };
+
+        } catch (err) {
+            alert("Error accessing camera: " + err);
+            startCamBtn.style.display = 'inline-block';
+            cameraBox.style.display = 'none';
+        }
+    }
+
+    async function startFaceDetection() {
+        statusText.innerText = "Looking for a face...";
+        statusText.className = "status-searching";
+
+        const displaySize = { width: video.videoWidth, height: video.videoHeight };
+        faceapi.matchDimensions(aiCanvas, displaySize);
+
+        faceDetectionInterval = setInterval(async () => {
+            const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions());
+            const ctx = aiCanvas.getContext('2d');
+            ctx.clearRect(0, 0, aiCanvas.width, aiCanvas.height);
+
+            if (detection) {
+                if (detection.score > 0.5) {
+                    isFaceDetected = true;
+                    statusText.innerHTML = "<i class='fas fa-check-circle'></i> Face Detected - Ready to Capture";
+                    statusText.className = "status-found";
+                    
+                    snapBtn.classList.add('active');
+                    snapBtn.innerText = "CAPTURE PHOTO";
+
+                    const resizedDetections = faceapi.resizeResults(detection, displaySize);
+                    faceapi.draw.drawDetections(aiCanvas, resizedDetections);
+                }
+            } else {
+                isFaceDetected = false;
+                statusText.innerText = "No Face Detected. Please look at the camera.";
+                statusText.className = "status-searching";
+                
+                snapBtn.classList.remove('active');
+                snapBtn.innerText = "NO FACE DETECTED";
+            }
+        }, 200);
+    }
+
+    function takeSnapshot() {
+        if (!stream || !isFaceDetected) return; 
+        
+        clearInterval(faceDetectionInterval); 
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0);
+        
+        const dataURL = canvas.toDataURL('image/jpeg', 0.7);
+        photo.src = dataURL;
+        photo.style.display = 'block';
+        faceInput.value = dataURL; 
+        
+        retakeBtn.style.display = 'inline-block';
+        cameraBox.style.display = 'none'; 
+    }
+
+    function retakePhoto() {
+        photo.style.display = 'none';
+        retakeBtn.style.display = 'none';
+        faceInput.value = '';
+        startCamera();
+    }
+
+    function validateForm() {
+        if (isAnnualPass) {
+            if (faceInput.value.trim() === "") {
+                alert("Please take a photo for your membership card.");
+                return false;
+            }
+        }
+        
+        // FIX BUG 2: Solusyon sa "hidden select required" issue ng browser kapag gumagamit ng Select2
+        const countryVal = document.getElementById('country_select').value;
+        if (countryVal === "") {
+            alert("Please select your Nationality / Country.");
+            // I-open ang dropdown kusa para madaling makita ng user kung anong kulang
+            $('#country_select').select2('open'); 
+            return false;
+        }
+        
+        return true;
+    }
+    // --- MODAL FUNCTIONS ---
+    function openTermsModal() {
+        document.getElementById('termsModal').style.display = 'flex';
+    }
+
+    function closeTermsModal() {
+        document.getElementById('termsModal').style.display = 'none';
+    }
+
+    // Para mag-close yung modal pag kinlick sa labas nung puting box
+    function closeTermsOutside(event) {
+        if (event.target.id === 'termsModal') {
+            closeTermsModal();
+        }
+    }
+
+  document.addEventListener("DOMContentLoaded", function() {
+    const phoneInput = document.getElementById('input_cust_phone');
+    const loadingIndicator = document.getElementById('autofill-loading');
+    
+    const firstNameInput = document.querySelector('input[name="first_name"]');
+    const lastNameInput = document.querySelector('input[name="last_name"]');
+    const emailInput = document.querySelector('input[name="email"]');
+    const companyInput = document.querySelector('input[name="company_name"]');
+    const countryInput = document.getElementById('country_select'); // Bagong Select ID
+
+    // 1. I-INITIALIZE ANG SMART PHONE INPUT
+    const phoneInputIti = window.intlTelInput(phoneInput, {
+        initialCountry: "ae", // Default Flag ay UAE
+        preferredCountries: ["ae", "sa", "om", "qa", "bh", "kw", "ph", "in", "pk", "us", "gb"], 
+        separateDialCode: true, 
+        utilsScript: "https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js",
+    });
+
+    // ========================================================================
+    // 2. I-GENERATE ANG KUMPLETONG BANSA AT EMOJI FLAGS SA DROPDOWN
+    // ========================================================================
+    const countryData = window.intlTelInputGlobals.getCountryData();
+    
+    // Function para gumawa ng Flag Emoji base sa Country Code (e.g., "ph" -> 🇵🇭)
+    function getFlagEmoji(countryCode) {
+        const codePoints = countryCode
+            .toUpperCase()
+            .split('')
+            .map(char => 127397 + char.charCodeAt());
+        return String.fromCodePoint(...codePoints);
+    }
+
+    // 1. KUNIN ANG UAE AT ILAGAY SA PINAKATAAS
+    const uaeData = countryData.find(c => c.iso2 === 'ae');
+    if (uaeData) {
+        const uaeOption = document.createElement('option');
+        uaeOption.value = uaeData.name;
+        uaeOption.text = getFlagEmoji(uaeData.iso2) + " " + uaeData.name;
+        countryInput.appendChild(uaeOption);
+    }
+
+    // 2. MAGLAGAY NG MAGANDANG DIVIDER PANG-SEPARATE
+    const divider = document.createElement('option');
+    divider.disabled = true;
+    divider.text = "───────────────";
+    countryInput.appendChild(divider);
+
+    // 3. ILAGAY ANG LAHAT NG IBANG BANSA (HUWAG NA ISAMA ULIT ANG UAE)
+    countryData.forEach(country => {
+        if (country.iso2 !== 'ae') {
+            const option = document.createElement('option');
+            option.value = country.name; 
+            option.text = getFlagEmoji(country.iso2) + " " + country.name; 
+            countryInput.appendChild(option);
+        }
+    });
+$(document).ready(function() {
+        $('#country_select').select2({
+            placeholder: "Select Nationality / Country",
+            allowClear: true,
+            width: 'resolve' // Para sumunod sa CSS width
+        });
+    });
+    // ========================================================================
+    // 3. AUTO DETECT SYSTEM (Hindi ito nasira)
+    // ========================================================================
+    let typingTimer;
+
+    phoneInput.addEventListener('input', function() {
+        clearTimeout(typingTimer);
+        
+        let fullInternationalNumber = phoneInputIti.getNumber();
+        let rawDigits = fullInternationalNumber.replace(/[^0-9]/g, '');
+
+        if(rawDigits.length >= 9) {
+            loadingIndicator.style.display = 'block';
+            loadingIndicator.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Searching exact customer...';
+            loadingIndicator.style.color = '#003B72';
+            
+            typingTimer = setTimeout(function() {
+                fetchCustomerDetails(fullInternationalNumber);
+            }, 1000); 
+        } else {
+            loadingIndicator.style.display = 'none';
+        }
+    });
+
+    function fetchCustomerDetails(phoneNumber) {
+        fetch('api_check_customer.php?phone=' + encodeURIComponent(phoneNumber))
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.name) {
+                    loadingIndicator.style.display = 'none'; 
+                    
+                    let fullName = data.name.trim();
+                    let nameParts = fullName.split(' ');
+                    
+                    if (nameParts.length > 1) {
+                        let lastName = nameParts.pop();
+                        let firstName = nameParts.join(' ');
+                        
+                        firstNameInput.value = firstName;
+                        lastNameInput.value = lastName;
+                    } else {
+                        firstNameInput.value = fullName;
+                    }
+
+                    if (data.email && data.email !== 'pos@ajmanwaterpark.com') {
+                        emailInput.value = data.email;
+                    }
+
+                    if (data.company) {
+                        companyInput.value = data.company;
+                    }
+
+                    // MATALINONG AUTO FILL PARA SA COUNTRY DROPDOWN
+                   // MATALINONG AUTO FILL PARA SA COUNTRY DROPDOWN
+if (data.country && data.country.trim() !== '') {
+    let dbCountry = data.country.trim().toLowerCase(); 
+    let options = countryInput.options;
+
+    for (let i = 0; i < options.length; i++) {
+        // Hanapin at i-match yung bansa kahit may flag emoji sa display
+        if (options[i].value.toLowerCase() === dbCountry) {
+            countryInput.selectedIndex = i; 
+            
+            // FIX: I-trigger ang change event para mag-update ang Select2 UI!
+            $('#country_select').trigger('change'); 
+            
+            break;
+        }
+    }
+}
+
+                    // GREEN FLASH EFFECT
+                    const flashColor = '#d4edda';
+                    firstNameInput.style.backgroundColor = flashColor;
+                    lastNameInput.style.backgroundColor = flashColor;
+                    if(emailInput.value !== '') emailInput.style.backgroundColor = flashColor;
+                    if(companyInput.value !== '') companyInput.style.backgroundColor = flashColor;
+                    
+                    // FIX BUG 1: Gamitin ang jQuery para kulayan ang Select2 UI (dahil hidden na ang original select)
+                    if(countryInput.value !== '') {
+                        $('.select2-selection').css('background-color', flashColor);
+                    }
+
+                    setTimeout(() => {
+                        firstNameInput.style.backgroundColor = '';
+                        lastNameInput.style.backgroundColor = '';
+                        emailInput.style.backgroundColor = '';
+                        companyInput.style.backgroundColor = '';
+                        // FIX BUG 1: Ibalik sa original na kulay ang Select2 UI
+                        $('.select2-selection').css('background-color', '');
+                    }, 1000);
+                    
+                } else {
+                    loadingIndicator.innerHTML = '<i class="fas fa-info-circle"></i> No exact record found. New guest.';
+                    loadingIndicator.style.color = '#666';
+                    setTimeout(() => { loadingIndicator.style.display = 'none'; }, 2500); 
+                }
+            })
+            .catch(error => {
+                loadingIndicator.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Error searching.';
+                loadingIndicator.style.color = 'red';
+                console.error("Auto-fill error:", error);
+                setTimeout(() => { loadingIndicator.style.display = 'none'; }, 2500);
+            });
+    }
+    
+    // Bago mag-submit, siguraduhin na kasama yung +971 or +63 na ise-save sa Database
+    document.getElementById('detailsForm').addEventListener('submit', function() {
+        phoneInput.value = phoneInputIti.getNumber();
+    });
+});
+</script>

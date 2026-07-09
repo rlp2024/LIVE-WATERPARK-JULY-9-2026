@@ -1,0 +1,225 @@
+<?php
+// print_receipt.php
+include_once 'db_connect.php'; // Siguraduhin na tama ang path ng db connection mo
+date_default_timezone_set('Asia/Dubai');
+
+$bookingId = $_GET['booking_id'] ?? '';
+
+if (empty($bookingId)) {
+    die("Error: No Booking ID provided.");
+}
+
+// 1. KUNIN ANG TRANSACTION DETAILS (Pinalitan ng "bookings" ang table)
+$stmt = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ? LIMIT 1");
+$stmt->execute([$bookingId]);
+$details = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$details) {
+    die("Error: Booking/Transaction not found.");
+}
+
+// 2. KUNIN ANG ITEMS (Galing sa booking_items table)
+// 2. KUNIN ANG ITEMS (Improved Query para makuha ang tamang pangalan)
+$stmtItems = $pdo->prepare("
+    SELECT 
+        bi.product_id, 
+        bi.quantity, 
+        bi.price_per_item AS price,
+        COALESCE(tt.category, bi.product_id) AS category, 
+        tt.sub_label 
+    FROM booking_items bi 
+    LEFT JOIN ticket_types tt ON (
+        bi.product_id = CONCAT('type_', tt.type_id) OR 
+        bi.product_id = CAST(tt.type_id AS CHAR)
+    )
+    WHERE bi.booking_id = ?
+");
+$stmtItems->execute([$bookingId]);
+$items = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+
+// 3. KUNIN ANG TICKET QRs
+$stmtTix = $pdo->prepare("SELECT ticket_code, ticket_type FROM ticket_instances WHERE booking_id = ?");
+$stmtTix->execute([$bookingId]);
+$tickets = $stmtTix->fetchAll(PDO::FETCH_ASSOC);
+
+// Variables para sa display
+$customerName = htmlspecialchars($details['customer_name'] ?? 'Walk-in Customer');
+$cashierName = htmlspecialchars($details['cashier_name'] ?? 'Admin');
+$date = date("d-M-Y h:i A", strtotime($details['created_at'] ?? date('Y-m-d H:i:s')));
+$visitDateRaw = $details['visit_date'] ?? $details['date_of_visit'] ?? null;
+$visitDate = $visitDateRaw ? date("d-M-Y", strtotime($visitDateRaw)) : "N/A";
+$totalAmount = number_format((float)($details['total_amount'] ?? 0), 2);
+$vatAmount = number_format((float)($details['vat_amount'] ?? 0), 2);
+$paymentMethod = strtoupper($details['payment_method'] ?? 'CASH');
+if ($paymentMethod === 'QR_POINTS') $paymentMethod = 'QR WALLET / POINTS';
+
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receipt - #<?php echo str_pad($bookingId, 6, '0', STR_PAD_LEFT); ?></title>
+    <style>
+        /* Base styles para sa screen preview */
+        body {
+            background-color: #e0e0e0;
+            padding: 20px;
+            font-family: 'Courier New', Courier, monospace; 
+            color: #000;
+        }
+        .receipt-container {
+            max-width: 350px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .text-center { text-align: center; }
+        .dashed-border-bottom { border-bottom: 1px dashed #000; padding-bottom: 10px; margin-bottom: 10px; }
+        .flex-between { display: flex; justify-content: space-between; margin: 2px 0; }
+        table { width: 100%; font-size: 12px; border-collapse: collapse; margin-bottom: 10px; }
+        th, td { border-bottom: 1px dashed #ccc; padding: 5px 0; vertical-align: top; }
+        th { text-align: left; }
+        .text-right { text-align: right; }
+        .text-center-td { text-align: center; }
+        
+        /* Styles kapag ipi-print na */
+        @media print {
+            body { background-color: #fff; padding: 0; margin: 0; }
+            .receipt-container { box-shadow: none; max-width: 100%; width: 300px; padding: 0; margin: 0 auto; }
+            .no-print { display: none !important; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="text-center no-print" style="margin-bottom: 20px;">
+        <button onclick="window.print()" style="background: #003B72; color: #fff; padding: 10px 20px; border: none; font-size: 16px; cursor: pointer; border-radius: 5px; font-weight: bold;">
+            🖨️ PRINT NOW
+        </button>
+    </div>
+
+    <div class="receipt-container">
+        
+        <div class="text-center dashed-border-bottom">
+            <img src="Images/awpemaillogo.png" alt="Ajman Water Park" style="max-width:140px; height:auto; margin:0 auto 10px;">
+            <h2 style="margin:0; font-size:18px; font-weight:900;">Ajman Water Park</h2>
+            <p style="font-size:11px; margin:5px 0;">Waterpark & Resorts, Ajman UAE</p>
+            <p style="font-size:11px; margin:0;">Tel: +971 52 120 7573</p>
+        </div>
+
+        <div style="font-size:11px;" class="dashed-border-bottom">
+            <p class="flex-between"><strong>Order ID:</strong> <span>#<?php echo str_pad($bookingId, 6, '0', STR_PAD_LEFT); ?></span></p>
+            <p class="flex-between"><strong>Purchase Date:</strong> <span><?php echo $date; ?></span></p>
+            <p class="flex-between"><strong>Date of Visit:</strong> <span><?php echo $visitDate; ?></span></p>
+            <p class="flex-between"><strong>Person on Duty:</strong> <span><?php echo $cashierName; ?></span></p>
+            <p class="flex-between"><strong>Customer:</strong> <span><?php echo $customerName; ?></span></p>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>ITEM</th>
+                    <th class="text-center-td">QTY</th>
+                    <th class="text-right">AMT</th>
+                </tr>
+            </thead>
+      <tbody>
+    <?php 
+    $computedItemsTotal = 0;
+    foreach ($items as $item): 
+        $pid = strtoupper((string)$item['product_id']); // Kunin ang Product ID
+        $cat = $item['category'] ?? '';
+        $sub = $item['sub_label'] ?? '';
+        $itemName = trim($cat . ' ' . $sub);
+
+        // --- MAPPING PARA SA RESIBO (Dito tayo magdedesisyon ng pangalan) ---
+        switch ($pid) {
+            case 'ADD1': $itemName = "Parking"; break;
+            case 'ADD2': $itemName = "Zipline"; break;
+            case 'ADD3': $itemName = "Locker"; break;
+            case 'ADD4': $itemName = "Hanging Bridge"; break;
+            case 'ADD5': $itemName = "Photography"; break;
+            case 'ADD6': $itemName = "Meal Voucher"; break;
+            default:
+                // Check kung New Card or Reload
+                if (strpos($pid, 'QRN_') === 0) {
+                    $itemName = "New QR Wallet Card";
+                } elseif (strpos($pid, 'QRR_') === 0) {
+                    $itemName = "QR Wallet Reload";
+                } 
+                // Fallback logic para sa Entrance Tickets
+                elseif (empty($itemName) || $itemName == $pid) {
+                    if (strpos($pid, 'TYPE_') === 0) {
+                        $itemName = "Entrance Ticket (" . str_replace('TYPE_', '', $pid) . ")";
+                    } else {
+                        $itemName = "Item: " . $pid;
+                    }
+                }
+                break;
+        }
+
+        $qty = (int)($item['quantity'] ?? 1);
+        $price = (float)($item['price'] ?? 0);
+        $rowTotal = $price * $qty;
+        $computedItemsTotal += $rowTotal;
+    ?>
+    <tr>
+        <td><strong><?php echo htmlspecialchars($itemName); ?></strong></td>
+        <td class="text-center-td"><?php echo $qty; ?></td>
+        <td class="text-right">AED <?php echo number_format($rowTotal, 2); ?></td>
+    </tr>
+    <?php endforeach; ?>
+</tbody>
+        </table>
+
+        <div style="border-top:1px dashed #000; padding-top:10px;">
+            <div class="flex-between" style="font-size:11px; margin-bottom:4px;">
+                <span>VAT (5% included):</span>
+                <span>AED <?php echo $vatAmount; ?></span>
+            </div>
+            <div style="font-size:16px; margin-bottom:8px;">
+                <strong>GRAND TOTAL:</strong> AED <?php echo $totalAmount; ?>
+            </div>
+            <div class="flex-between" style="font-size:11px;">
+                <span>Payment Method:</span>
+                <span style="font-weight:bold;"><?php echo htmlspecialchars($paymentMethod); ?></span>
+            </div>
+        </div>
+
+        <?php if (!empty($tickets)): ?>
+        <div style="text-align:center; border-top:2px dashed #000; margin-top:15px; padding-top:15px;">
+            <h3 style="margin:0 0 10px 0; font-family: Arial, sans-serif;">YOUR ENTRANCE TICKETS</h3>
+            <p style="font-size:11px; margin-bottom:15px; color:#555;">Scan each code individually at the Turnstile Gate.</p>
+            
+            <?php foreach ($tickets as $t): 
+                $ticketCode = htmlspecialchars($t['ticket_code'] ?? '');
+                $ticketType = htmlspecialchars($t['ticket_type'] ?? '');
+                $qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=" . urlencode($ticketCode);
+            ?>
+            <div style="display:inline-block; vertical-align:top; margin:5px; padding:10px; border:1px solid #ccc; border-radius:8px; width:110px;">
+                <img src="<?php echo $qrUrl; ?>" style="width:90px; height:90px; display:block; margin:0 auto;" alt="QR Code">
+                <div style="font-weight:bold; font-size:12px; margin-top:8px; text-transform:uppercase;"><?php echo $ticketType; ?></div>
+                <div style="font-size:9px; color:#666; font-family:monospace; margin-top:2px;"><?php echo $ticketCode; ?></div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+
+        <div style="text-align:center; margin-top:20px; padding-top:10px; border-top:1px solid #eee; font-size:10px;">
+            <p style="margin-bottom:5px;"><strong>Scan tickets above at entrance.</strong></p>
+            <p style="margin:5px 0;">Thank you for visiting!</p>
+            <p style="margin:0;">www.ajmanwaterpark.com</p>
+        </div>
+
+    </div>
+
+    <script>
+        window.onload = function() {
+            window.print();
+        };
+    </script>
+</body>
+</html>

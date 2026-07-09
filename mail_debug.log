@@ -1,0 +1,255 @@
+[2026-03-06 16:07:48] SMTP DEBUG [2]: SERVER -> CLIENT: 220-32.170.178.68.host.secureserver.net ESMTP Exim 4.99.1 #2 Fri, 06 Mar 2026 12:07:48 +0000 
+220-We do not authorize the use of this system to transport unsolicited, 
+220 and/or bulk e-mail.
+
+[2026-03-06 16:07:48] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-06 16:07:48] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250-STARTTLS
+250 HELP
+
+[2026-03-06 16:07:48] SMTP DEBUG [1]: CLIENT -> SERVER: STARTTLS
+
+[2026-03-06 16:07:48] SMTP DEBUG [2]: SERVER -> CLIENT: 220 TLS go ahead
+
+[2026-03-06 16:07:48] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-06 16:07:48] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250 HELP
+
+[2026-03-06 16:07:48] SMTP DEBUG [1]: CLIENT -> SERVER: AUTH LOGIN
+
+[2026-03-06 16:07:48] SMTP DEBUG [2]: SERVER -> CLIENT: 334 VXNlcm5hbWU6
+
+[2026-03-06 16:07:48] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-06 16:07:48] SMTP DEBUG [2]: SERVER -> CLIENT: 334 UGFzc3dvcmQ6
+
+[2026-03-06 16:07:48] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-06 16:07:50] SMTP DEBUG [2]: SERVER -> CLIENT: 535 Incorrect authentication data
+
+[2026-03-06 16:07:50] SMTP DEBUG [1]: SMTP ERROR: Password command failed: 535 Incorrect authentication data
+
+[2026-03-06 16:07:50] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-06 16:07:50] SMTP DEBUG [1]: CLIENT -> SERVER: QUIT
+
+[2026-03-06 16:07:50] SMTP DEBUG [2]: SERVER -> CLIENT: 221 32.170.178.68.host.secureserver.net closing connection
+
+[2026-03-06 16:07:50] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-06 16:07:50] sendEntryReceipt FAILED for booking #14: SMTP Error: Could not authenticate.
+[2026-03-06 16:07:50] PHPMailer ErrorInfo: SMTP Error: Could not authenticate.
+[2026-03-07 12:31:25] SMTP DEBUG [2]: SERVER -> CLIENT: 220-32.170.178.68.host.secureserver.net ESMTP Exim 4.99.1 #2 Sat, 07 Mar 2026 08:31:25 +0000 
+220-We do not authorize the use of this system to transport unsolicited, 
+220 and/or bulk e-mail.
+
+[2026-03-07 12:31:25] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-07 12:31:25] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250-STARTTLS
+250 HELP
+
+[2026-03-07 12:31:25] SMTP DEBUG [1]: CLIENT -> SERVER: STARTTLS
+
+[2026-03-07 12:31:25] SMTP DEBUG [2]: SERVER -> CLIENT: 220 TLS go ahead
+
+[2026-03-07 12:31:25] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-07 12:31:25] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250 HELP
+
+[2026-03-07 12:31:25] SMTP DEBUG [1]: CLIENT -> SERVER: AUTH LOGIN
+
+[2026-03-07 12:31:25] SMTP DEBUG [2]: SERVER -> CLIENT: 334 VXNlcm5hbWU6
+
+[2026-03-07 12:31:25] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-07 12:31:25] SMTP DEBUG [2]: SERVER -> CLIENT: 334 UGFzc3dvcmQ6
+
+[2026-03-07 12:31:25] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-07 12:31:28] SMTP DEBUG [2]: SERVER -> CLIENT: 535 Incorrect authentication data
+
+[2026-03-07 12:31:28] SMTP DEBUG [1]: SMTP ERROR: Password command failed: 535 Incorrect authentication data
+
+[2026-03-07 12:31:28] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-07 12:31:28] SMTP DEBUG [1]: CLIENT -> SERVER: QUIT
+
+[2026-03-07 12:31:28] SMTP DEBUG [2]: SERVER -> CLIENT: 221 32.170.178.68.host.secureserver.net closing connection
+
+[2026-03-07 12:31:28] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-07 12:31:28] sendEntryReceipt FAILED for booking #15: SMTP Error: Could not authenticate.
+[2026-03-07 12:31:28] PHPMailer ErrorInfo: SMTP Error: Could not authenticate.
+[2026-03-07 12:59:03] SMTP DEBUG [2]: SERVER -> CLIENT: 220-32.170.178.68.host.secureserver.net ESMTP Exim 4.99.1 #2 Sat, 07 Mar 2026 08:59:03 +0000 
+220-We do not authorize the use of this system to transport unsolicited, 
+220 and/or bulk e-mail.
+
+[2026-03-07 12:59:03] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-07 12:59:03] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250-STARTTLS
+250 HELP
+
+[2026-03-07 12:59:03] SMTP DEBUG [1]: CLIENT -> SERVER: STARTTLS
+
+[2026-03-07 12:59:03] SMTP DEBUG [2]: SERVER -> CLIENT: 220 TLS go ahead
+
+[2026-03-07 12:59:03] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-07 12:59:03] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250 HELP
+
+[2026-03-07 12:59:03] SMTP DEBUG [1]: CLIENT -> SERVER: AUTH LOGIN
+
+[2026-03-07 12:59:03] SMTP DEBUG [2]: SERVER -> CLIENT: 334 VXNlcm5hbWU6
+
+[2026-03-07 12:59:03] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-07 12:59:03] SMTP DEBUG [2]: SERVER -> CLIENT: 334 UGFzc3dvcmQ6
+
+[2026-03-07 12:59:03] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-07 12:59:05] SMTP DEBUG [2]: SERVER -> CLIENT: 535 Incorrect authentication data
+
+[2026-03-07 12:59:05] SMTP DEBUG [1]: SMTP ERROR: Password command failed: 535 Incorrect authentication data
+
+[2026-03-07 12:59:05] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-07 12:59:05] SMTP DEBUG [1]: CLIENT -> SERVER: QUIT
+
+[2026-03-07 12:59:05] SMTP DEBUG [2]: SERVER -> CLIENT: 221 32.170.178.68.host.secureserver.net closing connection
+
+[2026-03-07 12:59:05] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-07 12:59:05] sendEntryReceipt FAILED for booking #16: SMTP Error: Could not authenticate.
+[2026-03-07 12:59:05] PHPMailer ErrorInfo: SMTP Error: Could not authenticate.
+[2026-03-07 14:48:23] SMTP DEBUG [2]: SERVER -> CLIENT: 220-32.170.178.68.host.secureserver.net ESMTP Exim 4.99.1 #2 Sat, 07 Mar 2026 10:48:23 +0000 
+220-We do not authorize the use of this system to transport unsolicited, 
+220 and/or bulk e-mail.
+
+[2026-03-07 14:48:23] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-07 14:48:23] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250-STARTTLS
+250 HELP
+
+[2026-03-07 14:48:23] SMTP DEBUG [1]: CLIENT -> SERVER: STARTTLS
+
+[2026-03-07 14:48:23] SMTP DEBUG [2]: SERVER -> CLIENT: 220 TLS go ahead
+
+[2026-03-07 14:48:23] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-07 14:48:24] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250 HELP
+
+[2026-03-07 14:48:24] SMTP DEBUG [1]: CLIENT -> SERVER: AUTH LOGIN
+
+[2026-03-07 14:48:24] SMTP DEBUG [2]: SERVER -> CLIENT: 334 VXNlcm5hbWU6
+
+[2026-03-07 14:48:24] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-07 14:48:24] SMTP DEBUG [2]: SERVER -> CLIENT: 334 UGFzc3dvcmQ6
+
+[2026-03-07 14:48:24] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-07 14:48:26] SMTP DEBUG [2]: SERVER -> CLIENT: 535 Incorrect authentication data
+
+[2026-03-07 14:48:26] SMTP DEBUG [1]: SMTP ERROR: Password command failed: 535 Incorrect authentication data
+
+[2026-03-07 14:48:26] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-07 14:48:26] SMTP DEBUG [1]: CLIENT -> SERVER: QUIT
+
+[2026-03-07 14:48:26] SMTP DEBUG [2]: SERVER -> CLIENT: 221 32.170.178.68.host.secureserver.net closing connection
+
+[2026-03-07 14:48:26] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-07 14:48:26] sendEntryReceipt FAILED for booking #17: SMTP Error: Could not authenticate.
+[2026-03-07 14:48:26] PHPMailer ErrorInfo: SMTP Error: Could not authenticate.
+[2026-03-07 14:48:26] SMTP DEBUG [2]: SERVER -> CLIENT: 220-32.170.178.68.host.secureserver.net ESMTP Exim 4.99.1 #2 Sat, 07 Mar 2026 10:48:26 +0000 
+220-We do not authorize the use of this system to transport unsolicited, 
+220 and/or bulk e-mail.
+
+[2026-03-07 14:48:26] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-07 14:48:26] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250-STARTTLS
+250 HELP
+
+[2026-03-07 14:48:26] SMTP DEBUG [1]: CLIENT -> SERVER: STARTTLS
+
+[2026-03-07 14:48:26] SMTP DEBUG [2]: SERVER -> CLIENT: 220 TLS go ahead
+
+[2026-03-07 14:48:26] SMTP DEBUG [1]: CLIENT -> SERVER: EHLO ajmanwaterpark.com
+
+[2026-03-07 14:48:26] SMTP DEBUG [2]: SERVER -> CLIENT: 250-32.170.178.68.host.secureserver.net Hello ajmanwaterpark.com [2407:1c00:6101:2a80::]
+250-SIZE 52428800
+250-LIMITS MAILMAX=1000 RCPTMAX=50000
+250-8BITMIME
+250-PIPELINING
+250-PIPECONNECT
+250-AUTH PLAIN LOGIN
+250 HELP
+
+[2026-03-07 14:48:26] SMTP DEBUG [1]: CLIENT -> SERVER: AUTH LOGIN
+
+[2026-03-07 14:48:30] SMTP DEBUG [2]: SERVER -> CLIENT: 334 VXNlcm5hbWU6
+
+[2026-03-07 14:48:30] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-07 14:48:30] SMTP DEBUG [2]: SERVER -> CLIENT: 334 UGFzc3dvcmQ6
+
+[2026-03-07 14:48:30] SMTP DEBUG [1]: CLIENT -> SERVER: [credentials hidden]
+[2026-03-07 14:48:32] SMTP DEBUG [2]: SERVER -> CLIENT: 535 Incorrect authentication data
+
+[2026-03-07 14:48:32] SMTP DEBUG [1]: SMTP ERROR: Password command failed: 535 Incorrect authentication data
+
+[2026-03-07 14:48:32] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-07 14:48:32] SMTP DEBUG [1]: CLIENT -> SERVER: QUIT
+
+[2026-03-07 14:48:32] SMTP DEBUG [2]: SERVER -> CLIENT: 221 32.170.178.68.host.secureserver.net closing connection
+
+[2026-03-07 14:48:32] SMTP DEBUG [2]: SMTP Error: Could not authenticate.
+[2026-03-07 14:48:32] sendEntryReceipt FAILED for booking #17: SMTP Error: Could not authenticate.
+[2026-03-07 14:48:32] PHPMailer ErrorInfo: SMTP Error: Could not authenticate.

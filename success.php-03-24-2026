@@ -1,0 +1,413 @@
+<?php
+// success.php - FINAL FIXED VERSION (No Stripe Blockers)
+
+// Debugging
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+session_start();
+include_once 'db_connect.php';
+include_once 'email_helper.php';
+
+
+
+
+// ==============================================================================
+// 🔴 CONFIGURATION: N-GENIUS (NETWORK INTERNATIONAL)
+// ==============================================================================
+define('NGENIUS_API_KEY', 'NTc0MjQ4MGUtMTQ4OC00NzYzLTgxODktODgzYjQ3ZGZkZjQ2OjllMDVlMjczLWUxYjQtNDliZS04MDg1LWUyYmYyNmE5YTg3MQ=='); 
+define('NGENIUS_OUTLET_REF', '4a6f1b5e-610f-4440-8e3c-4fb6ddff7d1a'); 
+
+define('NGENIUS_AUTH_URL', 'https://api-gateway.ngenius-payments.com/identity/auth/access-token');
+define('NGENIUS_ORDER_URL', 'https://api-gateway.ngenius-payments.com/transactions/outlets/' . NGENIUS_OUTLET_REF . '/orders');
+
+
+//define('NGENIUS_AUTH_URL', 'https://api-gateway.sandbox.ngenius-payments.com/identity/auth/access-token');
+//define('NGENIUS_ORDER_URL', 'https://api-gateway.sandbox.ngenius-payments.com/transactions/outlets/' . NGENIUS_OUTLET_REF . '/orders');
+// LIVE URLs (Comment out sa taas, Uncomment ito pag live na):
+// Detect Kiosk Mode
+$is_kiosk = isset($_SESSION['kiosk_mode']) && $_SESSION['kiosk_mode'];
+
+// =============================
+// GET PARAMS
+// =============================
+$booking_id   = isset($_GET['booking_id']) ? (int)$_GET['booking_id'] : 0;
+// Note: session_id from Stripe is removed/ignored here since we use N-Genius/Cash
+
+// ✅ TOP-UP FLAGS (buy more add-ons for existing booking)
+$isTopup = false;
+$parent_booking_id = 0;
+
+if (isset($_GET['topup']) && $_GET['topup'] == '1') {
+    $isTopup = true;
+}
+if (isset($_GET['parent_booking_id'])) {
+    $isTopup = true;
+    $parent_booking_id = (int)$_GET['parent_booking_id'];
+}
+
+// If topup and booking_id not provided, use parent
+if ($isTopup && $parent_booking_id > 0 && $booking_id <= 0) {
+    $booking_id = $parent_booking_id;
+}
+
+// Normal flow requires booking_id
+if (!$booking_id) {
+    // Smart Redirect
+    if ($is_kiosk) {
+        header('Location: kiosk_home.php');
+    } else {
+        header('Location: book.php');
+    }
+    exit;
+}
+
+$booking_details = null;
+$email_error = "";
+
+try {
+    // 1) GET BOOKING DETAILS
+    $stmt_get = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+    $stmt_get->execute([$booking_id]);
+    $booking_details = $stmt_get->fetch(PDO::FETCH_ASSOC);
+
+    if (!$booking_details) {
+        if ($is_kiosk) {
+            header('Location: kiosk_home.php');
+        } else {
+            header('Location: book.php');
+        }
+        exit;
+    }
+
+    // =============================
+    // ✅ TOP-UP FLOW: ADD ADD-ONS TO EXISTING BOOKING
+    // =============================
+    if ($isTopup) {
+        
+        // IMPORTANT: We removed the Stripe Session check here.
+        // We assume if the user reached this page via process.php, the payment was successful.
+
+        // Proceed only if cart exists
+        // (Note: In kiosk mode, session might be volatile, but process.php should have passed checks)
+        if (!empty($_SESSION['cart']) && is_array($_SESSION['cart'])) {
+            
+            $pdo->beginTransaction();
+
+            // Prepare Statements for Upsert
+            $stmtCheckItem = $pdo->prepare("SELECT quantity FROM booking_items WHERE booking_id=? AND product_id=? LIMIT 1");
+            $stmtInsItem   = $pdo->prepare("INSERT INTO booking_items (booking_id, product_id, quantity, price_per_item) VALUES (?, ?, ?, ?)");
+            $stmtUpdItem   = $pdo->prepare("UPDATE booking_items SET quantity = quantity + ?, price_per_item = ? WHERE booking_id=? AND product_id=?");
+
+            $stmtUpsertRed = $pdo->prepare("
+                INSERT INTO addon_redemptions (booking_id, product_id, unique_code, quantity_total, quantity_used, status) 
+                VALUES (?, ?, ?, ?, 0, 'unused') 
+                ON DUPLICATE KEY UPDATE 
+                    quantity_total = quantity_total + VALUES(quantity_total), 
+                    status = 'unused'
+            ");
+
+            foreach ($_SESSION['cart'] as $item) {
+                // Clean Product ID
+                $rawID = $item['id']; // e.g., prod_123
+                $db_product_id = strtoupper(str_replace('prod_', '', $rawID));
+                
+                $qty   = (int)$item['quantity'];
+                $price = (float)$item['price'];
+
+                if ($qty <= 0) continue;
+
+                // 1. Booking Items (Record Purchase)
+                $stmtCheckItem->execute([$booking_id, $db_product_id]);
+                $exists = $stmtCheckItem->fetchColumn();
+
+                if ($exists !== false) {
+                    $stmtUpdItem->execute([$qty, $price, $booking_id, $db_product_id]);
+                } else {
+                    $stmtInsItem->execute([$booking_id, $db_product_id, $qty, $price]);
+                }
+
+                // 2. Add-on Redemptions (Enable Scanning)
+                // Generate Unique Code (Simple format: BOOKINGID-PRODUCTID)
+                $uniqueCode = $booking_id . '-' . $db_product_id;
+                $stmtUpsertRed->execute([$booking_id, $db_product_id, $uniqueCode, $qty]);
+            }
+
+            $pdo->commit();
+
+            // ✅ SEND EMAIL RECEIPT
+            try {
+                if (!empty($booking_details['customer_email']) && function_exists('sendAddonPurchaseReceipt')) {
+                    $purchasedItems = [];
+                    foreach ($_SESSION['cart'] as $item) {
+                        $pid = strtoupper(str_replace('prod_', '', $item['id']));
+                        $qty = (int)$item['quantity'];
+                        $price = (float)$item['price'];
+                        
+                        if ($qty <= 0) continue;
+
+                        // Fetch Name for email display
+                        $stmtP = $pdo->prepare("SELECT name FROM products WHERE product_id=? LIMIT 1");
+                        $stmtP->execute([$pid]);
+                        $p = $stmtP->fetch(PDO::FETCH_ASSOC);
+                        $name = $p ? $p['name'] : $pid;
+
+                        $purchasedItems[] = [
+                            'product_id' => $pid,
+                            'name' => $name,
+                            'quantity' => $qty,
+                            'price' => $price,
+                            'new_total' => null, 
+                            'used' => null, 
+                            'remaining' => null
+                        ];
+                    }
+
+                    $processedBy = $is_kiosk ? 'Self-Service Kiosk' : 'Online Top-up';
+                    
+                    sendAddonPurchaseReceipt(
+                        $booking_details['customer_email'],
+                        $booking_details['customer_name'],
+                        $booking_id,
+                        $purchasedItems,
+                        'card', 
+                        $processedBy
+                    );
+                }
+            } catch (Throwable $e) {
+                // Email failure should not stop the success page from showing
+                error_log("Topup receipt email failed: " . $e->getMessage());
+            }
+
+            // Clear TOPUP sessions
+            unset($_SESSION['cart']);
+            unset($_SESSION['total_price']);
+            unset($_SESSION['booking_date']);
+            unset($_SESSION['discount_applied']);
+            unset($_SESSION['expiry_date']);
+            unset($_SESSION['is_annual_pass']);
+            unset($_SESSION['guest']);
+            unset($_SESSION['topup_for_booking_id']);
+        }
+        
+        // If it's admin/scanner mode (NOT Kiosk), redirect back to scanner immediately
+        if (!$is_kiosk) {
+             header("Location: admin_verify_addons.php?booking_id=" . $booking_id . "&msg=topup_success");
+             exit;
+        }
+        
+        // If KIOSK mode, we stay here to show the Success Screen below.
+    }
+
+    // =============================
+    // NORMAL BOOKING FLOW (New Bookings)
+    // =============================
+    
+    // 2. MARK AS PAID IF PENDING
+    // Since we came from process.php success callback, we can assume it's paid.
+    if ($booking_details['payment_status'] === 'pending') {
+        $stmt = $pdo->prepare("UPDATE bookings SET payment_status = 'paid' WHERE booking_id = ?");
+        $stmt->execute([$booking_id]);
+        $booking_details['payment_status'] = 'paid';
+    }
+
+    // 3. SEND CONFIRMATION EMAIL (If not a top-up)
+    // Only send if we haven't sent one yet (optional check, or just send)
+    if (!$isTopup && $booking_details) {
+        try {
+            // Re-fetch items for email
+            $stmt_items = $pdo->prepare("SELECT product_id, quantity, price_per_item as price FROM booking_items WHERE booking_id = ?");
+            $stmt_items->execute([$booking_id]);
+            $rawItems = $stmt_items->fetchAll(PDO::FETCH_ASSOC);
+
+            $items = [];
+            foreach($rawItems as $row) {
+                $name = "Unknown Item";
+                $pid = $row['product_id'];
+
+                if (strpos($pid, 'type_') === 0) {
+                    $typeId = str_replace('type_', '', $pid);
+                    $stmtT = $pdo->prepare("SELECT category, sub_label FROM ticket_types WHERE type_id = ?");
+                    $stmtT->execute([$typeId]);
+                    $t = $stmtT->fetch();
+                    if($t) $name = $t['category'] . ' (' . $t['sub_label'] . ')';
+                } else {
+                    $stmtP = $pdo->prepare("SELECT name FROM products WHERE product_id = ?");
+                    $stmtP->execute([$pid]);
+                    $p = $stmtP->fetch();
+                    if($p) $name = $p['name'];
+                }
+
+                $items[] = [
+                    'product_id' => $pid,
+                    'name' => $name,
+                    'quantity' => $row['quantity'],
+                    'price' => $row['price']
+                ];
+            }
+
+            $isAnnualPass = !empty($booking_details['expiry_date']);
+            $cashierName = $is_kiosk ? "Self-Service Kiosk" : "Website";
+
+            if ($isAnnualPass) {
+                sendBookingConfirmation(
+                    $booking_details['customer_email'],
+                    $booking_details['customer_name'],
+                    $booking_id,
+                    $booking_details,
+                    $items
+                );
+            } else {
+                sendEntryReceipt(
+                    $booking_details['customer_email'],
+                    $booking_details['customer_name'],
+                    $booking_id,
+                    $booking_details,
+                    $items,
+                    $cashierName
+                );
+            }
+
+        } catch (Throwable $e) {
+            $email_error = "Email Error: " . $e->getMessage();
+        }
+    }
+
+    // 4. CLEAR ALL SESSIONS
+    unset($_SESSION['cart']);
+    unset($_SESSION['total_price']);
+    unset($_SESSION['booking_date']);
+    unset($_SESSION['discount_applied']);
+    unset($_SESSION['expiry_date']);
+    unset($_SESSION['is_annual_pass']);
+    unset($_SESSION['guest']);
+
+} catch (Exception $e) {
+    if (isset($pdo) && $pdo->inTransaction()) { $pdo->rollBack(); }
+    echo "System Error: " . $e->getMessage();
+    exit;
+}
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Booking Confirmed - Ajman Water Park</title>
+    <link rel="stylesheet" href="booking-style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+
+    <style>
+        .success-card { text-align: center; padding: 50px 30px; max-width: 500px; margin: 40px auto; }
+        .success-icon { font-size: 5rem; color: #28a745; margin-bottom: 20px; }
+        .ref-number { background: #f4f8fb; padding: 15px; border-radius: 10px; margin: 15px 0; color: #003B72; font-weight: 700; font-size: 1.2rem; border: 1px dashed #003B72; }
+        .error-box { background: #fff3cd; color: #856404; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-size: 0.8rem; border: 1px solid #ffeeba; }
+        .qr-container { margin: 20px 0; }
+        .qr-container img { border: 1px solid #eee; padding: 5px; border-radius: 5px; }
+
+        .details-box { text-align:left; background:#fafafa; padding:20px; border-radius:10px; font-size:0.95rem; margin-bottom:20px; border-left: 5px solid #003B72; }
+        .details-row { margin-bottom: 8px; display: flex; justify-content: space-between; }
+        .details-label { color: #666; font-weight: 600; }
+        .details-value { color: #333; font-weight: bold; text-align: right; }
+
+        .validity-badge { background-color: #e8f5e9; color: #2e7d32; padding: 5px 10px; border-radius: 50px; font-size: 0.85rem; font-weight: bold; display: inline-block; margin-bottom: 10px; }
+
+        .member-photo-box { width: 150px; height: 150px; margin: 0 auto 20px auto; position: relative; }
+        .member-photo-box img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; border: 5px solid #28a745; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+        .check-badge { position: absolute; bottom: 5px; right: 5px; background: #28a745; color: white; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; border: 3px solid white; }
+    </style>
+</head>
+<body>
+    <div class="booking-wrapper">
+        <div class="white-card success-card">
+            <?php if (!empty($email_error)): ?>
+                <div class="error-box">
+                    <strong>Note:</strong> Payment successful, but email failed.<br>
+                    <?php echo htmlspecialchars($email_error); ?>
+                </div>
+            <?php endif; ?>
+
+            <?php if (!empty($booking_details['face_image_path'])): ?>
+                <div class="member-photo-box">
+                    <img src="uploads/faces/<?php echo htmlspecialchars($booking_details['face_image_path']); ?>" alt="Member Photo" onerror="this.style.display='none'; this.parentElement.innerHTML='<div class=\'success-icon\'><i class=\'fas fa-check-circle\'></i></div>';">
+                    <div class="check-badge"><i class="fas fa-check"></i></div>
+                </div>
+            <?php else: ?>
+                <div class="success-icon"><i class="fas fa-check-circle"></i></div>
+            <?php endif; ?>
+
+            <h1 style="color:#003B72; margin:0 0 10px 0;">
+                <?php echo $isTopup ? 'Add-ons Purchased!' : 'Payment Successful!'; ?>
+            </h1>
+            <p style="color:#666; margin:0;">
+                <?php echo $isTopup ? 'Your items have been added to your booking.' : 'Thank you for booking with Ajman Water Park.'; ?>
+            </p>
+
+            <div class="ref-number">
+                BOOKING ID: #<?php echo str_pad($booking_id, 6, '0', STR_PAD_LEFT); ?>
+            </div>
+
+            <div class="qr-container">
+                <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=<?php echo $booking_id; ?>" alt="QR Code">
+                <p style="font-size:0.8rem; color:#888; margin-top:5px;">Please show this QR code at the entrance.</p>
+            </div>
+
+            <?php if ($booking_details): ?>
+            <div class="details-box">
+                <div style="text-align: center; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+                    <?php if (!empty($booking_details['expiry_date'])): ?>
+                        <span class="validity-badge"><i class="fas fa-crown"></i> ANNUAL PASS MEMBER</span>
+                        <div style="color: #003B72; font-size: 1.1rem; font-weight: 800; margin-top: 5px;">
+                            VALID UNTIL: <?php echo date("F d, Y", strtotime($booking_details['expiry_date'])); ?>
+                        </div>
+                    <?php else: ?>
+                        <span style="color: #666; font-size: 0.9rem;">DATE OF VISIT</span>
+                        <div style="color: #003B72; font-size: 1.1rem; font-weight: 800;">
+                            <?php echo date("F d, Y", strtotime($booking_details['visit_date'])); ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+
+                <div class="details-row">
+                    <span class="details-label">Name:</span>
+                    <span class="details-value"><?php echo htmlspecialchars($booking_details['customer_name']); ?></span>
+                </div>
+
+                <div class="details-row">
+                    <span class="details-label">Email:</span>
+                    <span class="details-value" style="font-size:0.85rem;"><?php echo htmlspecialchars($booking_details['customer_email']); ?></span>
+                </div>
+
+                <div class="details-row">
+                    <span class="details-label">Amount Paid:</span>
+                    <span class="details-value">AED <?php echo number_format($booking_details['total_amount'], 2); ?></span>
+                </div>
+
+                <div class="details-row">
+                    <span class="details-label">Payment Method:</span>
+                    <span class="details-value"><?php echo strtoupper($booking_details['payment_method']); ?></span>
+                </div>
+
+                <?php if ($booking_details['discount_code']): ?>
+                    <div class="details-row" style="color:green;">
+                        <span class="details-label" style="color:green;">Discount Code:</span>
+                        <span class="details-value"><?php echo htmlspecialchars($booking_details['discount_code']); ?></span>
+                    </div>
+                <?php endif; ?>
+            </div>
+            <?php endif; ?>
+
+            <?php 
+                $redirectUrl = ($is_kiosk) ? "https://ajmanwaterpark.com/kiosk_home.php" : "book.php"; 
+                $buttonText = ($is_kiosk) ? "Back to Home" : "Book Another";
+            ?>
+            <a href="<?php echo $redirectUrl; ?>" class="ww-next-btn" style="text-decoration:none; display:inline-block; padding: 15px 30px; background: #003B72; color: white; border-radius: 50px;"><?php echo $buttonText; ?></a>
+        </div>
+    </div>
+
+<!--?php require_once $_SERVER['DOCUMENT_ROOT'] . '/includes/kiosk_fullscreen_include.php'; ?>-->
+
+</body>
+</html>

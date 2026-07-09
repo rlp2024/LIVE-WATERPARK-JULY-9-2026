@@ -1,0 +1,694 @@
+<?php
+// checkout.php - FINAL VERSION (UPDATED - SAFE FOR "kiosk buy add ons only.php" filename with spaces)
+session_start();
+include_once 'db_connect.php';
+// =========================================================
+// A) CAPTURE GUEST DETAILS FROM details.php (FIX NULL ISSUE)
+// =========================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['first_name'], $_POST['last_name'], $_POST['email'], $_POST['phone'])) {
+
+    $first = trim($_POST['first_name']);
+    $last  = trim($_POST['last_name']);
+
+    $_SESSION['guest_details'] = [
+        'customer_name'  => trim($first . ' ' . $last),
+        'customer_email' => trim($_POST['email']),
+        'customer_phone' => trim((string)$_POST['phone']),
+        'phone_code'     => isset($_POST['phone_code']) ? trim($_POST['phone_code']) : null,
+        'company_name'   => isset($_POST['company_name']) && trim($_POST['company_name']) !== '' ? trim($_POST['company_name']) : null,
+        'nationality'    => isset($_POST['country']) && trim($_POST['country']) !== '' ? trim($_POST['country']) : null,
+        'customer_type'  => (isset($_POST['are_you']) && in_array($_POST['are_you'], ['visitor','residence'], true)) ? $_POST['are_you'] : null,
+    ];
+}
+
+
+// ---------------------------------------------------------
+// [ADDED] CSRF TOKEN (optional, ready for process.php validation)
+// ---------------------------------------------------------
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+// ---------------------------------------------------------
+// [ADDED] KIOSK ADD-ONS FILE (ORIGINAL FILENAME WITH SPACES)
+// IMPORTANT: use URL-encoded version for header() redirects + href safety
+// ---------------------------------------------------------
+$KIOSK_ADDONS_FILE = 'kiosk buy add ons only.php';
+$KIOSK_ADDONS_URL  = str_replace(' ', '%20', $KIOSK_ADDONS_FILE);
+
+// ---------------------------------------------------------
+// 1. KIOSK MODE DETECTION
+// ---------------------------------------------------------
+$isKiosk = false;
+if ((isset($_GET['mode']) && $_GET['mode'] == 'kiosk') || (isset($_SESSION['kiosk_mode']) && $_SESSION['kiosk_mode'] == true)) {
+    $isKiosk = true;
+    $_SESSION['kiosk_mode'] = true;
+}
+
+// ---------------------------------------------------------
+// [ADDED] KIOSK CHECKOUT GUEST SAVE (fallback only)
+// ---------------------------------------------------------
+$guest_msg = "";
+$guest_msg_type = "";
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['save_kiosk_guest'])) {
+
+    $fn = trim($_POST['first_name'] ?? '');
+    $ln = trim($_POST['last_name'] ?? '');
+    $em = trim($_POST['email'] ?? '');
+    $ph = trim($_POST['phone'] ?? '');
+    $ct = trim($_POST['country'] ?? '');
+
+    // Basic validation (email required)
+    if ($em === "" || !filter_var($em, FILTER_VALIDATE_EMAIL)) {
+        $guest_msg = "Please enter a valid email.";
+        $guest_msg_type = "error";
+    } else {
+        $pc = trim($_POST['phone_code'] ?? '+971');
+        $co = trim($_POST['company_name'] ?? '');
+        $ay = $_POST['are_you'] ?? null;
+
+        if (!in_array($ay, ['visitor','residence'], true)) {
+            $ay = null;
+        }
+
+        $_SESSION['guest'] = [
+            'first_name'    => $fn,
+            'last_name'     => $ln,
+            'email'         => $em,
+            'phone_code'    => $pc,
+            'phone'         => $ph,
+            'company_name'  => $co,
+            'country'       => $ct,     // this maps to nationality later
+            'are_you'       => $ay      // this maps to customer_type later
+        ];
+
+
+        // If ever you want to allow face_image from kiosk later, ready:
+        if (isset($_POST['face_image']) && !empty($_POST['face_image'])) {
+            $_SESSION['guest']['face_image'] = $_POST['face_image'];
+        }
+
+        // IMPORTANT: Do NOT override kiosk_addons marker
+        // (so back link remains kiosk add-ons)
+        $guest_msg = "Guest details saved.";
+        $guest_msg_type = "success";
+    }
+}
+
+// ---------------------------------------------------------
+// 2. NEW LOGIC: DIRECT CART CALCULATION FROM KIOSK ADD-ONS
+// ---------------------------------------------------------
+// Check if user came from 'kiosk_addons' step AND posted tickets directly
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['tickets']) && isset($_SESSION['last_step']) && $_SESSION['last_step'] == 'kiosk_addons') {
+    $cart = [];
+    $total_price = 0;
+
+    foreach ($_POST['tickets'] as $id => $qty) {
+        $qty = (int)$qty;
+        if ($qty <= 0) continue; 
+
+        // Fetch Product Info directly here since we skipped details.php
+        $stmt = $pdo->prepare("SELECT product_id, name, price FROM products WHERE product_id = ?");
+        $stmt->execute([$id]);
+        $prod = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($prod) {
+            $cartItem = [
+                'id' => 'prod_' . $prod['product_id'],
+                'name' => $prod['name'], 
+                'price' => $prod['price'],
+                'quantity' => $qty,
+                'subtotal' => $prod['price'] * $qty,
+            ];
+            $cart['prod_' . $id] = $cartItem;
+            $total_price += $cartItem['subtotal'];
+        }
+    }
+    
+    // Set Session Data for Payment
+    $_SESSION['cart'] = $cart;
+    $_SESSION['original_total'] = $total_price;
+    $_SESSION['total_price'] = $total_price;
+}
+
+// ---------------------------------------------------------
+// 3. CAPTURE GUEST DETAILS (For Standard Flow / details.php)
+// ---------------------------------------------------------
+// [ADDED] !isset($_POST['save_kiosk_guest']) to prevent overriding kiosk_addons marker
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['email']) && !isset($_POST['apply_discount']) && !isset($_POST['remove_discount']) && !isset($_POST['save_kiosk_guest'])) {
+    $ay = $_POST['are_you'] ?? null;
+if (!in_array($ay, ['visitor','residence'], true)) {
+    $ay = null;
+}
+
+$_SESSION['guest'] = [
+    'first_name'    => $_POST['first_name'] ?? '',
+    'last_name'     => $_POST['last_name'] ?? '',
+    'email'         => $_POST['email'] ?? '',
+    'phone_code'    => $_POST['phone_code'] ?? '+971',
+    'phone'         => $_POST['phone'] ?? '',
+    'company_name'  => $_POST['company_name'] ?? '',
+    'country'       => $_POST['country'] ?? '',
+    'are_you'       => $ay
+];
+
+
+    if (isset($_POST['face_image']) && !empty($_POST['face_image'])) {
+        $_SESSION['guest']['face_image'] = $_POST['face_image'];
+    }
+    // Update marker for standard flow
+    $_SESSION['last_step'] = 'details'; 
+}
+
+
+// ---------------------------------------------------------
+// [ADDED] FLAGS FOR KIOSK ADD-ONS GUEST FALLBACK
+// ---------------------------------------------------------
+$allowGuestCaptureOnCheckout = ($isKiosk && isset($_SESSION['last_step']) && $_SESSION['last_step'] == 'kiosk_addons');
+$guestIsMissing = (empty($_SESSION['guest']) || empty($_SESSION['guest']['email']));
+$showGuestForm = ($allowGuestCaptureOnCheckout && $guestIsMissing);
+
+// ---------------------------------------------------------
+// 4. VALIDATION & REDIRECT GUARD
+// ---------------------------------------------------------
+// [UPDATED via addition] allow kiosk_addons to stay on checkout even if guest missing (show form instead)
+if (empty($_SESSION['cart']) || ($guestIsMissing && !$allowGuestCaptureOnCheckout)) { 
+    // Smart Redirect: Balik sa pinanggalingan kung expire na session
+    if ($isKiosk && isset($_SESSION['last_step']) && $_SESSION['last_step'] == 'kiosk_addons') {
+        header('Location: ' . $KIOSK_ADDONS_URL);
+    } else {
+        header('Location: book.php'); 
+    }
+    exit; 
+}
+
+// ---------------------------------------------------------
+// 5. CALCULATION LOGIC (Existing)
+// ---------------------------------------------------------
+$msg = "";
+$msg_type = "";
+
+// STEP A: RECALCULATE BASE TOTAL
+$fresh_total = 0;
+if(isset($_SESSION['cart'])){
+    foreach ($_SESSION['cart'] as $item) {
+        $fresh_total += $item['subtotal'];
+    }
+}
+$_SESSION['original_total'] = $fresh_total; 
+
+// STEP B: HANDLE REMOVE DISCOUNT
+if (isset($_POST['remove_discount'])) {
+    unset($_SESSION['discount_applied']);
+    $msg = "Discount removed.";
+    $msg_type = "info";
+}
+
+// STEP C: HANDLE APPLY DISCOUNT
+if (isset($_POST['apply_discount'])) {
+    $code = strtoupper(trim($_POST['discount_code']));
+    $today = date('Y-m-d');
+
+    $stmt = $pdo->prepare("SELECT * FROM discount_codes WHERE code = ? AND start_date <= ? AND end_date >= ? AND usage_count < usage_limit LIMIT 1");
+    $stmt->execute([$code, $today, $today]);
+    $discount = $stmt->fetch();
+
+    if ($discount) {
+        $_SESSION['discount_applied'] = [
+            'code' => $code,
+            'percent' => $discount['discount_value']
+        ];
+        $msg = "Code applied! " . $discount['discount_value'] . "% Off.";
+        $msg_type = "success";
+    } else {
+        $msg = "Invalid, Expired, or Fully Redeemed Code.";
+        $msg_type = "error";
+    }
+}
+
+// STEP D: FINAL CALCULATION (WITH 5% VAT)
+$subtotal_after_discount = $_SESSION['original_total'];
+
+if (isset($_SESSION['discount_applied'])) {
+    $percent = $_SESSION['discount_applied']['percent'];
+    $discountAmount = ($_SESSION['original_total'] * $percent) / 100;
+    $_SESSION['discount_applied']['amount'] = $discountAmount;
+    $subtotal_after_discount = $_SESSION['original_total'] - $discountAmount;
+}
+
+// Calculate 5% VAT on the amount after discount
+$vat_amount = $subtotal_after_discount * 0.05;
+$_SESSION['vat_amount'] = $vat_amount;
+
+// Final Grand Total
+$_SESSION['total_price'] = $subtotal_after_discount + $vat_amount;
+
+$tabbyInstallment = $_SESSION['total_price'] / 4;
+
+
+
+if (!$isKiosk) {
+    include_once 'header.php';
+}
+
+// [LOGIC UPDATE] Determine Back Link URL
+// Note: Make sure the filename matches exactly what you have in your folder (spaces vs underscores)
+$back_link_url = (isset($_SESSION['last_step']) && $_SESSION['last_step'] == 'kiosk_addons') ? $KIOSK_ADDONS_URL : 'details.php';
+
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Checkout - Payment Selection</title>
+    <link rel="stylesheet" href="booking-style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+
+    <style>
+        /* Kiosk Top Bar Styles */
+        .kiosk-top-bar {
+            padding: 20px 5%;
+            background-color: #fff;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .kiosk-back-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            background-color: #333;
+            color: #fff;
+            padding: 15px 30px;
+            border-radius: 50px;
+            text-decoration: none;
+            font-size: 1.2rem;
+            font-weight: bold;
+            transition: background 0.3s;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .kiosk-back-btn:hover {
+            background-color: #000;
+            transform: translateY(-2px);
+        }
+        .kiosk-back-btn span {
+            font-size: 1.5rem;
+            line-height: 1;
+        }
+
+        /* Payment Radio Buttons */
+        .payment-option {
+            background: #f9f9f9; border: 1px solid #ddd; padding: 15px; border-radius: 10px;
+            display: flex; align-items: center; margin-bottom: 15px; cursor: pointer; transition: 0.2s;
+        }
+        .payment-option:hover { border-color: #003B72; background: white; }
+        .payment-option input { display: none; }
+        .radio-dot {
+            width: 20px; height: 20px; border: 2px solid #ccc; border-radius: 50%; margin-right: 15px; position: relative;
+            flex-shrink: 0; 
+        }
+        .payment-option input:checked + .radio-dot { border-color: #003B72; }
+        .payment-option input:checked + .radio-dot::after {
+            content: ''; width: 10px; height: 10px; background: #003B72; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        }
+        .pay-icons { margin-left: auto; font-size: 1.5rem; display: flex; align-items: center; }
+        
+        /* Specific Tabby Style */
+        .tabby-promo-text { font-size: 0.9rem; color: #333; line-height: 1.3; }
+        
+        /* DISCOUNT STYLE */
+        .discount-box { 
+            background: #f8f9fa; 
+            padding: 15px; 
+            border-radius: 12px; 
+            margin-bottom: 20px; 
+            border: 1px solid #e9ecef; 
+        }
+
+        .discount-title {
+            font-size: 0.9rem; 
+            font-weight: 700; 
+            color: #333; 
+            margin-bottom: 8px;
+            display: block;
+        }
+
+        .discount-form { 
+            display: flex; 
+            gap: 0; 
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            border-radius: 8px;
+            overflow: hidden; 
+        }
+
+        .discount-input { 
+            flex: 1; 
+            padding: 12px 15px; 
+            border: 1px solid #ddd; 
+            border-right: none; 
+            border-radius: 8px 0 0 8px; 
+            font-size: 0.95rem; 
+            outline: none;
+            transition: 0.3s;
+        }
+        
+        .discount-input:focus {
+            background: #fff;
+            border-color: #003B72;
+        }
+
+        .btn-apply { 
+            background: #003B72; 
+            color: white; 
+            border: 1px solid #003B72; 
+            padding: 0 5px; 
+            border-radius: 0 8px 8px 0; 
+            cursor: pointer; 
+            font-weight: bold;
+            font-size: 0.9rem;
+            transition: background 0.3s;
+        }
+
+        .btn-apply:hover { 
+            background: #002855; 
+        }
+
+        .btn-remove { 
+            background: #fff; 
+            color: #dc3545; 
+            border: 1px solid #dc3545; 
+            padding: 5px 12px; 
+            border-radius: 50px; 
+            font-size: 0.8rem; 
+            cursor: pointer; 
+            font-weight: bold;
+        }
+        .btn-remove:hover {
+            background: #dc3545;
+            color: white;
+        }
+
+        /* Message Styles */
+        .alert { padding: 10px; border-radius: 6px; margin-bottom: 10px; font-size: 0.85rem; display:flex; align-items:center; gap:8px;}
+        .alert-success { background: #d1e7dd; color: #0f5132; border: 1px solid #badbcc; }
+        .alert-error { background: #f8d7da; color: #842029; border: 1px solid #f5c2c7; }
+
+        /* [ADDED] guest capture styles */
+        .guest-card {
+            background: #ffffff;
+            border: 1px solid #e9ecef;
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .guest-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        .guest-grid input,
+        .guest-grid select {
+            width: 100%;
+            padding: 12px 12px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            font-size: 0.95rem;
+            outline: none;
+        }
+        .guest-grid input:focus {
+            border-color: #003B72;
+        }
+        .btn-save-guest {
+            margin-top: 12px;
+            background: #003B72;
+            color: #fff;
+            border: 1px solid #003B72;
+            padding: 12px 16px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 800;
+            width: 100%;
+        }
+        .btn-save-guest:hover {
+            background: #002855;
+        }
+    </style>
+</head>
+<body>
+
+    <?php if ($isKiosk): ?>
+        <div class="kiosk-top-bar">
+            <a href="kiosk_home.php" class="kiosk-back-btn">
+                <span>&#8592;</span> Back to Home
+            </a>
+        </div>
+    <?php endif; ?>
+
+    <form action="process.php" method="POST">
+        <!-- [ADDED] hidden flags -->
+        <input type="hidden" name="is_kiosk" value="<?php echo $isKiosk ? '1' : '0'; ?>">
+        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
+
+        <div class="booking-wrapper">
+            <div class="booking-container">
+                
+                <div class="booking-main">
+                    <div class="ww-main-card" style="display:block;">
+
+                        <!-- [ADDED] Guest capture fallback only for kiosk_addons if guest missing -->
+                        <?php if($showGuestForm): ?>
+                            <div class="guest-card">
+                                <h3 style="margin:0 0 8px 0; color:#003B72;">Guest Details Required</h3>
+                                <p style="margin:0 0 12px 0; color:#666; font-size:0.95rem;">
+                                    Please save guest details before proceeding to payment.
+                                </p>
+
+                                <?php if(!empty($guest_msg)): ?>
+                                    <div class="alert alert-<?php echo $guest_msg_type; ?>">
+                                        <?php if($guest_msg_type == 'success') echo '<i class="fas fa-check-circle"></i>'; ?>
+                                        <?php if($guest_msg_type == 'error') echo '<i class="fas fa-exclamation-circle"></i>'; ?>
+                                        <?php echo $guest_msg; ?>
+                                    </div>
+                                <?php endif; ?>
+
+                                <div class="guest-grid">
+                                    <select name="phone_code">
+    <option value="+971" <?php echo (($_POST['phone_code'] ?? ($_SESSION['guest']['phone_code'] ?? '+971'))=='+971')?'selected':''; ?>>+971</option>
+    <option value="+63"  <?php echo (($_POST['phone_code'] ?? ($_SESSION['guest']['phone_code'] ?? ''))=='+63')?'selected':''; ?>>+63</option>
+    <option value="+1"   <?php echo (($_POST['phone_code'] ?? ($_SESSION['guest']['phone_code'] ?? ''))=='+1')?'selected':''; ?>>+1</option>
+</select>
+
+<input type="text" name="company_name" placeholder="Company Name"
+    value="<?php echo htmlspecialchars($_POST['company_name'] ?? ($_SESSION['guest']['company_name'] ?? '')); ?>">
+
+                                    <input type="text" name="first_name" placeholder="First Name"
+                                        value="<?php echo htmlspecialchars($_POST['first_name'] ?? ($_SESSION['guest']['first_name'] ?? '')); ?>">
+                                    <input type="text" name="last_name" placeholder="Last Name"
+                                        value="<?php echo htmlspecialchars($_POST['last_name'] ?? ($_SESSION['guest']['last_name'] ?? '')); ?>">
+                                    <input type="email" name="email" placeholder="Email (required)"
+                                        value="<?php echo htmlspecialchars($_POST['email'] ?? ($_SESSION['guest']['email'] ?? '')); ?>" required>
+                                    <input type="text" name="phone" placeholder="Phone"
+                                        value="<?php echo htmlspecialchars($_POST['phone'] ?? ($_SESSION['guest']['phone'] ?? '')); ?>">
+                                    <input type="text" name="country" placeholder="Country"
+                                        value="<?php echo htmlspecialchars($_POST['country'] ?? ($_SESSION['guest']['country'] ?? '')); ?>">
+                                </div>
+                                <div style="margin-top:12px; display:flex; gap:18px; align-items:center;">
+    <strong style="color:#003B72;">Are You?</strong>
+    <label style="display:flex; gap:6px; align-items:center;">
+        <input type="radio" name="are_you" value="visitor"
+            <?php echo (($_POST['are_you'] ?? ($_SESSION['guest']['are_you'] ?? ''))=='visitor')?'checked':''; ?>>
+        Visitor
+    </label>
+    <label style="display:flex; gap:6px; align-items:center;">
+        <input type="radio" name="are_you" value="residence"
+            <?php echo (($_POST['are_you'] ?? ($_SESSION['guest']['are_you'] ?? ''))=='residence')?'checked':''; ?>>
+        Residence
+    </label>
+</div>
+
+
+                                <button type="submit" name="save_kiosk_guest" formnovalidate formaction="checkout.php" class="btn-save-guest">
+                                    SAVE DETAILS
+                                </button>
+                            </div>
+                        <?php endif; ?>
+
+                        <h2 style="margin-bottom:20px; color:#003B72;">Select Payment Method</h2>
+                        <p style="margin-bottom:20px; color:#666;">All transactions are secure and encrypted.</p>
+
+                        <?php if($isKiosk): ?>
+                            <!--<label class="payment-option" style="background:#fff3cd; border-color:#ffeeba;">
+                                <input type="radio" name="payment_method" value="cash">
+                                <div class="radio-dot" style="border-color:#856404;"></div>
+                                <span style="font-weight:bold; color:#856404;">PAY CASH</span>
+                                <div class="pay-icons" style="color:#856404;"><i class="fas fa-money-bill-wave"></i></div>
+                            </label>-->
+                        <?php endif; ?>
+
+                        <label class="payment-option">
+                            <input type="radio" name="payment_method" value="card" checked>
+                            <div class="radio-dot"></div>
+                            <strong>Credit / Debit Card</strong>
+                            <div class="pay-icons" style="color:#003B72;">
+                                <i class="fab fa-cc-visa"></i>&nbsp;<i class="fab fa-cc-mastercard"></i>
+                            </div>
+                        </label>
+
+                        <label class="payment-option">
+                            <input type="radio" name="payment_method" value="apple_pay"> 
+                            <div class="radio-dot"></div>
+                            <strong>Apple Pay</strong>
+                            <div class="pay-icons" style="color:black;"><i class="fab fa-apple"></i></div>
+                        </label>
+
+                        <label class="payment-option">
+                            <input type="radio" name="payment_method" value="google_pay">
+                            <div class="radio-dot"></div>
+                            <strong>Google Pay</strong>
+                            <div class="pay-icons" style="color:#EA4335;"><i class="fab fa-google-pay"></i></div>
+                        </label>
+
+                        <!--<label class="payment-option">
+                            <input type="radio" name="payment_method" value="tabby">
+                            <div class="radio-dot"></div>
+                            <div>
+                                <strong style="display:block;">Pay in 4. No interest.</strong>
+                                <span class="tabby-promo-text">
+                                    4 payments of <strong>AED <?php echo number_format($tabbyInstallment, 2); ?></strong>
+                                </span>
+                            </div>
+                            <div class="pay-icons">
+                                <img src="Images/tabby_logo.jpg" alt="Tabby" style="height:25px; width:auto;">
+                            </div>
+                        </label>-->
+
+                    </div>
+                </div>
+
+                <div class="booking-sidebar">
+                    <div class="sidebar-box">
+                        <h4 style="color:#003B72; text-align:center;">ORDER REVIEW</h4>
+                        
+                        <div style="background:#f4f8fb; padding:10px; border-radius:8px; margin-bottom:15px; font-size:0.9rem;">
+                            <strong><?php echo htmlspecialchars(($_SESSION['guest']['first_name'] ?? '') . ' ' . ($_SESSION['guest']['last_name'] ?? '')); ?></strong><br>
+                            <?php echo htmlspecialchars($_SESSION['guest']['email'] ?? ''); ?><br>
+                            <?php echo htmlspecialchars($_SESSION['guest']['phone'] ?? ''); ?><br>
+                            
+                            <?php if (isset($_SESSION['guest']['face_image']) && !empty($_SESSION['guest']['face_image'])): ?>
+                                <div style="margin-top:5px; color:green; font-weight:bold; font-size:0.8rem;">
+                                    <i class="fas fa-check-circle"></i> Photo Captured
+                                </div>
+                            <?php endif; ?>
+                            <?php if (isset($_SESSION['is_annual_pass']) && $_SESSION['is_annual_pass']): ?>
+                                <div style="margin-top:5px; color:#003B72; font-weight:bold;">
+                                    <i class="fas fa-calendar-check"></i> Valid Until: 
+                                    <?php echo isset($_SESSION['expiry_date']) ? date("F d, Y", strtotime($_SESSION['expiry_date'])) : 'N/A'; ?>
+                                </div>
+                                <small style="color:#666;">(Valid for 1 Year from today)</small>
+                            <?php else: ?>
+                                Date of Visit: <?php echo isset($_SESSION['booking_date']) ? date("F d, Y", strtotime($_SESSION['booking_date'])) : 'Today'; ?>
+                            <?php endif; ?>
+                        </div>
+
+                        <?php foreach ($_SESSION['cart'] as $item): ?>
+                            <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:0.9rem;">
+                                <span><?php echo $item['name']; ?> (x<?php echo $item['quantity']; ?>)</span>
+                                <strong>AED <?php echo number_format($item['subtotal'], 2); ?></strong>
+                            </div>
+                        <?php endforeach; ?>
+                        
+                        <hr style="border:0; border-top:1px solid #eee; margin:15px 0;">
+
+                        <div class="discount-box">
+                            
+                            <?php if(!empty($msg)): ?>
+                                <div class="alert alert-<?php echo $msg_type; ?>">
+                                    <?php if($msg_type == 'success') echo '<i class="fas fa-check-circle"></i>'; ?>
+                                    <?php if($msg_type == 'error') echo '<i class="fas fa-exclamation-circle"></i>'; ?>
+                                    <?php echo $msg; ?>
+                                </div>
+                            <?php endif; ?>
+
+                            <?php if(isset($_SESSION['discount_applied'])): ?>
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <div>
+                                        <span class="discount-title" style="margin:0; color:#198754;">Code Applied!</span>
+                                        <strong style="font-size:1.1rem; color:#003B72;"><?php echo $_SESSION['discount_applied']['code']; ?></strong>
+                                    </div>
+                                    <button type="submit" name="remove_discount" formnovalidate formaction="checkout.php" class="btn-remove">
+                                        Remove
+                                    </button>
+                                </div>
+
+                            <?php else: ?>
+                                <label class="discount-title">Have a Discount Code?</label>
+                                <div class="discount-form">
+                                    <input type="text" name="discount_code" class="discount-input" placeholder="Enter promo code">
+                                    <button type="submit" name="apply_discount" formnovalidate formaction="checkout.php" class="btn-apply">
+                                        APPLY
+                                    </button>
+                                </div>
+                            <?php endif; ?>
+
+                        </div>
+                        
+                        <div style="display:flex; justify-content:space-between; font-size:1rem; color:#666; margin-bottom:5px;">
+                            <span>Subtotal</span>
+                            <span>AED <?php echo number_format($_SESSION['original_total'], 2); ?></span>
+                        </div>
+
+                        <?php if(isset($_SESSION['discount_applied'])): ?>
+                            <div style="display:flex; justify-content:space-between; font-size:1rem; color:#28a745; margin-bottom:5px;">
+                                <span>Discount (<?php echo $_SESSION['discount_applied']['percent']; ?>%)</span>
+                                <span>- AED <?php echo number_format($_SESSION['discount_applied']['amount'], 2); ?></span>
+                            </div>
+                        <?php endif; ?>
+
+                        <div style="display:flex; justify-content:space-between; font-size:1rem; color:#666; margin-bottom:5px;">
+                            <span>VAT (5%)</span>
+                            <span>+ AED <?php echo number_format($_SESSION['vat_amount'] ?? 0, 2); ?></span>
+                        </div>
+
+                        <div style="display:flex; justify-content:space-between; font-size:1.2rem; font-weight:800; color:#003B72; border-top:1px solid #ddd; padding-top:10px;">
+                            <span>GRAND TOTAL</span>
+                            <span>AED <?php echo number_format($_SESSION['total_price'], 2); ?></span>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="ww-footer">
+            <div class="ww-footer-inner">
+                <div class="ww-footer-left">
+                    <span class="ww-total-lbl" style="font-size: 0.9rem; color: rgba(255,255,255,0.8);">Total to Pay</span>
+                    <strong class="ww-total-val" style="font-size: 1.5rem;">AED <?php echo number_format($_SESSION['total_price'], 2); ?></strong>
+                </div>
+                <div class="ww-steps-container">
+                    <div class="ww-step-circle"><i class="fas fa-check"></i></div>
+                    <div class="ww-step-circle"><i class="fas fa-check"></i></div>
+                    <div class="ww-step-circle active">3</div>
+                </div>
+                <div class="ww-footer-right">
+                    <a href="<?php echo $back_link_url; ?>" class="ww-next-btn" style="background:transparent; border:1px solid rgba(255,255,255,0.5); color:white; margin-right:10px; text-decoration:none;">BACK</a>
+
+                    <!-- [ADDED] disable PAY NOW if kiosk_addons guest is missing -->
+                    <button type="submit" class="ww-next-btn" <?php echo $showGuestForm ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''; ?>>
+                        PAY NOW <i class="fas fa-lock"></i>
+                    </button>
+
+                </div>
+            </div>
+        </div>
+    </form>
+
+<!--?php require_once $_SERVER['DOCUMENT_ROOT'] . '/includes/kiosk_fullscreen_include.php'; ?>-->
+    
+</body>
+</html>

@@ -1,0 +1,3 @@
+[2026-03-06 12:08:07] sendEntryReceipt | SMTP Error: Could not connect to SMTP host. Connection failed. stream_socket_enable_crypto(): Peer certificate CN=`32.170.178.68.host.secureserver.net' did not match expected CN=`smtp.gmail.com'
+[2026-03-06 14:42:09] sendEntryReceipt | SMTP Error: Could not connect to SMTP host. Connection failed. stream_socket_enable_crypto(): Peer certificate CN=`32.170.178.68.host.secureserver.net' did not match expected CN=`smtp.gmail.com'
+[2026-03-06 14:55:36] sendEntryReceipt | SMTP Error: Could not connect to SMTP host. Connection failed. stream_socket_enable_crypto(): Peer certificate CN=`32.170.178.68.host.secureserver.net' did not match expected CN=`smtp.gmail.com'

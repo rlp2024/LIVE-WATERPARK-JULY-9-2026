@@ -1,0 +1,1798 @@
+/* ===== GLOBAL STYLES ===== */
+:root {
+    --primary-color: #07afa4cc; /* ITO ANG KULAY MO: rgb(7, 175, 164) */
+    --primary-color-dark: #058f86;
+    --secondary-color: #08d4c6; 
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: 'Poppins', 'Gagalin-Regular', 'Gotham-Bold', sans-serif; 
+    background-color: #f4f8fb; /* Light blue background */
+    color: #333;
+    overflow-x: hidden; /* Para maiwasan ang horizontal scroll */
+}
+
+
+.container {
+    width: 90%;
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.container-narrow {
+    max-width: 1500px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+/* ===== 1. HEADER SECTION (STICKY NA) ===== */
+.header {
+    background-color: var(--primary-color); /* BAGONG KULAY */
+    color: white;
+    box-shadow: 0 2px 5px #00000049;
+    position: sticky; /* Dumidikit sa taas */
+    top: 0;
+    z-index: 1000;
+}
+
+.header-top {
+    background-color: rgb(0, 133, 156);
+    padding: 8px 0;
+    font-size: 0.8rem;
+}
+
+.main-nav .container {
+    height: 100px;
+    flex-wrap: wrap; /* Para sa mobile menu */
+}
+
+.logo img {
+    height: 60px; /* In-adjust para sa Ajman logo */
+}
+
+.nav-links {
+    list-style: none;
+    display: flex;
+    gap: 30px;
+    align-items: center;
+}
+
+.nav-links a {
+    text-decoration: none;
+    color: rgb(255, 255, 255);
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+/* BAGONG STYLES PARA SA DROPDOWN */
+.nav-item-dropdown {
+    position: relative;
+    padding: 20px 0; /* Para sa hover area */
+}
+
+.nav-link-dropdown {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.nav-link-dropdown i {
+    font-size: 0.7rem;
+    transition: transform 0.3s ease;
+}
+
+.nav-item-dropdown:hover .nav-link-dropdown i {
+    transform: rotate(180deg);
+}
+
+.dropdown-menu {
+    display: none;
+    position: absolute;
+    top: 70px; /* Inilapit sa nav-item */
+    left: 0;
+    background-color: white;
+    border-radius: 10px;
+    box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+    min-width: 200px;
+    padding: 10px 0;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(10px);
+    transition: all 0.3s ease;
+}
+
+.nav-item-dropdown:hover .dropdown-menu {
+    display: block;
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.dropdown-menu a {
+    color: #333;
+    padding: 12px 20px;
+    display: block;
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.dropdown-menu a:hover {
+    background-color: #f4f8fb;
+}
+/* DULO NG DROPDOWN STYLES */
+
+
+.btn-book-now {
+    background-color: #ff0000; /* BAGONG KULAY */
+    color: white;
+    text-decoration: none;
+    padding: 12px 25px;
+    border-radius: 25px;
+    font-weight: 700;
+    font-size: 0.9rem;
+    transition: background-color 0.3s ease;
+}
+
+.btn-book-now:hover {
+    background-color: var(--primary-color-dark); /* BAGONG KULAY */
+}
+
+.mobile-menu-toggle {
+    display: none; /* Itatago sa desktop */
+    background: none;
+    border: none;
+    color: white;
+    font-size: 1.8rem;
+    cursor: pointer;
+}
+
+/* ===== 2. HERO SECTION (WILD WADI STYLE) ===== */
+.hero {
+position: relative; /* MAHALAGA ITO */
+color: white;
+text-align: center;
+height: 85vh; /* <--- ITO ANG IPALIT */
+overflow: visible; /* MAHALAGA ITO - Pinalitan mula "hidden" */
+padding-bottom: 150px; /* Space sa baba para sa floating tabs */
+margin-bottom: 0; /* Alisin ang anumang dating margin */ 
+}
+
+.hero-slider {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+bottom: 0; /* <--- ITO ANG IPALIT */
+    z-index: 1;
+}
+
+.hero-slide {
+    width: 100%;
+    height: 85vh; /* Dapat 100% ng hero-slider */
+    background-size: cover;
+    background-position: center;
+}
+
+.hero-slide-video {
+    width: 100%;
+    height: 100vh; /* Dapat 100% ng hero-slider */
+    position: relative;
+    overflow: hidden;
+    background-color: var(--primary-color); /* BAGONG KULAY */
+}
+
+.hero-slide-video video {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 100%;
+    min-height: 100%;
+    width: auto;
+    height: auto;
+    z-index: 1;
+}
+
+/* BAGONG STYLES PARA SA GIFS */
+.hero-gif {
+    position: absolute;
+    bottom: 0;
+    z-index: 2;
+    width: 25%;
+    max-width: 300px;
+    pointer-events: none; /* Para hindi ma-click */
+}
+.gif-sam {
+    right: 5%;
+}
+.gif-nana {
+    left: 5%;
+}
+/* DULO NG GIF STYLES */
+
+.hero-content {
+    position: relative;
+    z-index: 3; 
+    padding-top: 120px; /* Inangat */
+}
+
+.hero-content h1 {
+    font-size: 3.5rem;
+    font-weight: 800;
+    margin-bottom: 10px;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+}
+
+.hero-content p {
+    font-size: 1.25rem;
+    font-weight: 600;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+}
+
+.hero .slick-dots {
+    bottom: 180px; /* Itinaas para di matabunan ng tabs */
+    z-index: 2;
+}
+
+.hero .slick-dots li button:before {
+    font-size: 12px;
+    color: white;
+    opacity: 0.6;
+}
+.hero .slick-dots li.slick-active button:before {
+    opacity: 1;
+}
+
+
+/* ===== BAGONG "WILD WADI" TAB STYLING ===== */
+.tabs-wrapper {
+    position: absolute;
+    bottom: 0; /* Idikit sa baba ng hero */
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    width: 90%; 
+    max-width: 1100px;
+    margin-top: 0; /* Alisin ang lumang margin-top */
+}
+
+.tabs-container {
+    background-color: #ffffff;
+    border-radius: 15px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+}
+
+.tab-buttons {
+    display: flex;
+    background-color: #f9f9f9; 
+    border-bottom: 1px solid #eee;
+}
+
+.tab-btn {
+    flex: 1;
+    padding: 20px;
+    background-color: transparent; /* Inactive tabs */
+    color: var(--primary-color-dark);
+    border: none;
+    cursor: pointer;
+    font-family: 'Montserrat', sans-serif;
+    font-weight: 700;
+    font-size: 1rem;
+    transition: all 0.3s ease;
+    display: flex; 
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border-bottom: 4px solid transparent; 
+}
+
+.tab-btn i {
+    font-size: 1.1rem;
+    color: var(--primary-color-dark);
+}
+.tab-btn .mobile-arrow {
+    display: none; /* Itago ang arrow sa desktop */
+}
+
+.tab-btn.active {
+    background-color: var(--primary-color); 
+    color: #ffffff;
+    border-bottom-color: var(--secondary-color); 
+}
+
+.tab-btn.active i {
+    color: #ffffff;
+}
+
+.tab-btn:not(.active):hover {
+    background-color: #f0f0f0;
+}
+
+.tab-content {
+    background-color: #ffffff;
+    padding: 25px;
+    max-height: 450px; /* ITO ANG AYOS: Para hindi humaba */
+    overflow-y: auto; /* Lagyan ng scroll kung lumagpas */
+}
+
+.tab-panel {
+    display: none;
+    animation: fadeIn 0.5s;
+}
+
+.tab-panel.active {
+    display: block; 
+}
+
+/* Styles para sa content sa loob ng tabs */
+.tab-panel[data-tab="1"],
+.tab-panel[data-tab="2"] {
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+.tab-panel[data-tab="1"].active,
+.tab-panel[data-tab="2"].active {
+    display: grid;
+}
+.ticket-card {
+    display: flex; 
+    align-items: center; 
+    gap: 15px; 
+    width: 100%; 
+    text-align: left;
+    padding: 10px;
+    border-radius: 10px;
+    transition: transform 0.2s ease, box-shadow 0.2s ease; /* HOVER ANIMATION */
+    position: relative;
+    background-color: #fff; /* Para sa z-index */
+}
+.ticket-card:hover {
+    transform: scale(1.03); /* HOVER ANIMATION */
+    box-shadow: 0 8px 25px rgba(0,0,0,0.1); /* HOVER ANIMATION */
+    z-index: 5;
+}
+
+.ticket-card img {
+    width: 100px; /* Pinaliit para sa design */
+    aspect-ratio: 1 / 1;
+    border-radius: 10px;
+    object-fit: cover;
+}
+.ticket-info h3 { font-size: 1.1rem; font-weight: 700; color: var(--primary-color); }
+.ticket-info p { font-size: 0.9rem; color: #555; margin-top: 5px; }
+.ticket-price { margin-left: auto; text-align: right; white-space: nowrap; }
+.ticket-price span { font-size: 0.9rem; color: #777; }
+.ticket-price strong { display: block; font-size: 1.5rem; font-weight: 800; color: var(--primary-color); margin: 5px 0; }
+.btn-book-ticket {
+    background-color: var(--primary-color); color: white; text-decoration: none; padding: 10px 30px;
+    border-radius: 20px; font-weight: 600; font-size: 0.9rem; display: inline-block;
+    transition: background-color 0.3s ease;
+}
+.btn-book-ticket:hover { background-color: var(--secondary-color); }
+
+/* Inalis na ang .offer-card specific styles */
+
+
+/* ===== TAB 3 CONTENT (ANNUAL PASS) ===== */
+.tab-panel[data-tab="3"] { display: none; }
+.tab-panel[data-tab="3"].active { display: block; }
+
+.pass-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 20px;
+}
+.pass-card {
+    background: #ffffff;
+    border-radius: 20px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    border: 1px solid #eee;
+    padding: 15px;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    transition: transform 0.2s ease, box-shadow 0.2s ease; /* HOVER ANIMATION */
+    position: relative;
+}
+.pass-card:hover {
+    transform: scale(1.03); /* HOVER ANIMATION */
+    box-shadow: 0 10px 30px rgba(7, 175, 164, 0.2); /* HOVER ANIMATION */
+    z-index: 5;
+}
+.pass-card:nth-child(2) {
+    box-shadow: 0 10px 30px rgba(7, 175, 164, 0.2);
+    border: 1px solid var(--primary-color);
+}
+.pass-card img {
+    width: 100%;
+    border-radius: 15px;
+    margin-bottom: 15px;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+}
+.pass-card h3 {
+    font-size: 1.3rem;
+    font-weight: 800;
+    color: var(--primary-color);
+}
+.pass-card p {
+    font-size: 0.9rem;
+    color: #555;
+    line-height: 1.5;
+    margin: 10px 0 15px 0;
+}
+.pass-card ul {
+    list-style: none;
+    margin-bottom: 20px;
+    flex-grow: 1; 
+}
+.pass-card ul li {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 10px;
+}
+.pass-card ul li i {
+    color: var(--secondary-color);
+    margin-right: 10px;
+    width: 20px;
+    text-align: center;
+}
+.price-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid #eee;
+    padding-top: 15px;
+}
+.price-footer strong {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+/* ===== DULO NG TAB STYLING ===== */
+/* ============================================= */
+/* ===== 3. ADVENTURE FEATURES SECTION ===== */
+/* ============================================= */
+.adventure-features {
+    padding: 80px 0;
+    text-align: center;
+    background-color: var(--bg-light);
+    margin-top: 0px; 
+}
+
+.adventure-features h2 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+    margin-bottom: 15px;
+}
+.adventure-features p {
+    font-size: 1.1rem;
+    color: var(--text-muted);
+    line-height: 1.6;
+    margin-bottom: 40px;
+}
+.features-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 20px;
+}
+.feature-item {
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    transition: transform 0.3s ease;
+}
+.feature-item:hover {
+    transform: translateY(-5px);
+}
+.feature-item i {
+    font-size: 3rem;
+    margin-bottom: 15px;
+}
+.feature-item h3 {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--primary-color);
+}
+/* Kulay ng box galing sa dating Tailwind */
+.feature-item:nth-child(1) { background-color: #ffedd5; } /* bg-orange-100 */
+.feature-item:nth-child(1) i { color: #ef4444; } /* text-red-500 */
+
+.feature-item:nth-child(2) { background-color: #fef9c3; } /* bg-yellow-100 */
+.feature-item:nth-child(2) i { color: #f97316; } /* text-orange-500 */
+
+.feature-item:nth-child(3) { background-color: #fce7f3; } /* bg-pink-100 */
+.feature-item:nth-child(3) i { color: #3b82f6; } /* text-blue-500 */
+
+.feature-item:nth-child(4) { background-color: #dcfce7; } /* bg-green-100 */
+.feature-item:nth-child(4) i { color: #06b6d4; } /* text-cyan-500 */
+
+/* ===== 4. EXCITING EVENTS SECTION ===== */
+.exciting-events {
+    padding: 80px 0;
+    text-align: center;
+    background-color: #f4f8fb;
+}
+.exciting-events h2 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+    margin-bottom: 15px;
+}
+.exciting-events p {
+    font-size: 1.1rem;
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 40px;
+}
+.events-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 30px;
+}
+.event-card {
+    background-color: #ffffff;
+    border-radius: 20px;
+    box-shadow: 0 10px 20px rgba(0,0,0,0.07);
+    overflow: hidden;
+    text-align: left;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+.event-card img {
+    width: 100%;
+    aspect-ratio: 3 / 4; 
+    object-fit: cover;
+}
+.event-content { 
+    padding: 25px; 
+    display: flex;
+    flex-direction: column;
+    flex-grow: 1;
+}
+.event-content span {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #777;
+}
+.event-content h3 {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+    margin: 10px 0;
+}
+.event-content p {
+    font-size: 0.9rem;
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 20px;
+    flex-grow: 1;
+}
+.event-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 20px;
+}
+.event-footer .price {
+    font-size: 1.2rem;
+    font-weight: 800;
+    color: var(--primary-color);
+}
+.btn-book-dark {
+    background-color: var(--primary-color);
+    color: white;
+    text-decoration: none;
+    padding: 12px 30px;
+    border-radius: 25px;
+    font-weight: 700;
+    font-size: 0.9rem;
+    transition: background-color 0.3s ease;
+    border: none;
+    cursor: pointer;
+}
+.btn-book-dark:hover {
+    background-color: var(--secondary-color);
+    color: white;
+}
+.coming-soon-banner {
+    position: absolute;
+    top: 20px;
+    left: 0;
+    background-color: rgba(0, 0, 0, 0.7);
+    color: white;
+    padding: 8px 15px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    border-top-right-radius: 10px;
+    border-bottom-right-radius: 10px;
+}
+
+/* ===== 5. WHY WADI SLIDER SECTION ===== */
+.why-wadi {
+    padding: 80px 0;
+    background: linear-gradient(180deg, #058f86 0%, #036f68 100%); /* BAGONG KULAY */
+    text-align: center;
+}
+.why-wadi h2 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: #ffffff;
+    margin-bottom: 15px;
+}
+.why-wadi p {
+    font-size: 1.1rem;
+    color: #e0e0e0;
+    line-height: 1.6;
+    margin-bottom: 40px;
+}
+.slide-card {
+    background: #ffffff;
+    border-radius: 25px;
+    overflow: hidden;
+    margin: 0 15px;
+    box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+.slide-card img {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+}
+.slide-content {
+    padding: 25px;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    flex-grow: 1;
+}
+.slide-content h3 {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+}
+.slide-content p {
+    font-size: 1rem;
+    color: #555;
+    margin-top: 10px;
+    margin-bottom: 0;
+    flex-grow: 1;
+}
+.why-wadi .slick-dots li button:before {
+    font-size: 12px;
+    color: #ffffff;
+    opacity: 0.5;
+}
+.why-wadi .slick-dots li.slick-active button:before {
+    opacity: 1;
+}
+
+/* ===== 6. EVENTS SLIDER SECTION (PACKAGES) ===== */
+.events-celebrations {
+    padding: 80px 0;
+    text-align: center;
+    background-color: #ffffff;
+}
+.events-celebrations h2 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+    margin-bottom: 15px;
+}
+.events-celebrations p {
+    font-size: 1.1rem;
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 40px;
+    max-width: 600px;
+    margin-left: auto;
+    margin-right: auto;
+}
+.event-slide-card {
+    background: #ffffff;
+    border-radius: 20px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    margin: 15px;
+    overflow: hidden;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    height: 100%; 
+}
+.event-slide-card img {
+    width: 100%;
+    aspect-ratio: 3 / 4; 
+    object-fit: cover;
+    flex-shrink: 0; 
+}
+.event-slide-card h3 {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--primary-color);
+    margin: 15px 20px 10px 20px;
+}
+.event-slide-card p {
+    font-size: 0.9rem;
+    color: #555;
+    line-height: 1.5;
+    margin: 0 20px 20px 20px;
+    flex-grow: 1; 
+}
+.btn-discover {
+    display: inline-block;
+    border: 2px solid var(--primary-color);
+    color: var(--primary-color);
+    text-decoration: none;
+    padding: 10px 25px;
+    border-radius: 25px;
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin: 0 20px 20px 20px;
+    transition: all 0.3s ease;
+    flex-shrink: 0; 
+}
+.btn-discover:hover {
+    background-color: var(--primary-color);
+    color: white;
+}
+
+/* ===== 7. VISITORS SPEAK SECTION ===== */
+.visitors-speak {
+    padding: 80px 0;
+    text-align: center;
+    background-color: #f4f8fb;
+}
+.visitors-speak h2 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+    margin-bottom: 15px;
+}
+.visitors-speak p {
+    font-size: 1.1rem;
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 40px;
+    max-width: 600px;
+    margin-left: auto;
+    margin-right: auto;
+}
+.review-platforms {
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+    margin-bottom: 40px;
+}
+.platform-card {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    background: #ffffff;
+    padding: 20px;
+    border-radius: 20px;
+    box-shadow: 0 10px 20px rgba(0,0,0,0.07);
+    text-align: left;
+}
+.platform-card img { height: 50px; }
+.platform-card span {
+    display: block;
+    font-size: 0.9rem;
+    color: #555;
+}
+.platform-card strong {
+    font-size: 1.2rem;
+    color: var(--primary-color);
+}
+.platform-card a {
+    margin-left: 20px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--secondary-color);
+}
+.review-card {
+    background: #ffffff;
+    border-radius: 20px;
+    padding: 25px;
+    margin: 15px;
+    text-align: left;
+    min-height: 220px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+.review-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+.review-header strong {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--primary-color);
+}
+.review-header span {
+    font-size: 0.9rem;
+    color: #777;
+}
+.review-header span i {
+    color: #db4437;
+    margin-right: 5px;
+}
+.review-stars {
+    color: #f5b301;
+    font-size: 1.1rem;
+    margin-bottom: 10px;
+}
+.review-card p {
+    font-size: 0.95rem;
+    color: #333;
+    line-height: 1.6;
+    margin: 0;
+}
+
+/* ===== 8. AI PLANNER SECTION ===== */
+.ai-planner {
+    padding: 80px 0;
+    text-align: center;
+    background-color: #ffffff;
+}
+.ai-planner h2 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+    margin-bottom: 15px;
+}
+.ai-planner p {
+    font-size: 1.1rem;
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 30px;
+}
+.planner-form {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    max-width: 700px;
+    margin: 0 auto;
+}
+.planner-inputs {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    align-items: center;
+}
+.planner-inputs label {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #333;
+}
+.planner-inputs input {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1.1rem;
+    padding: 10px;
+    width: 80px;
+    border: 2px solid #ddd;
+    border-radius: 10px;
+    text-align: center;
+}
+.planner-form textarea {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1rem;
+    padding: 15px;
+    border: 2px solid #ddd;
+    border-radius: 10px;
+    resize: vertical;
+    min-height: 80px;
+}
+.planner-form button {
+    padding: 15px;
+    font-size: 1.1rem;
+}
+#planner-output {
+    margin-top: 30px;
+    background: #f9f9f9;
+    border: 1px dashed var(--primary-color);
+    border-radius: 10px;
+    padding: 25px;
+    text-align: left;
+    display: none; /* Itatago by default */
+}
+#planner-output h3 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--primary-color);
+    margin-bottom: 15px;
+}
+#planner-output p {
+    font-size: 1rem;
+    color: #333;
+    line-height: 1.7;
+    margin-bottom: 10px;
+}
+#planner-output ul {
+    list-style: disc;
+    padding-left: 20px;
+}
+#planner-output ul li {
+    margin-bottom: 8px;
+    color: #333;
+}
+#planner-output .loader {
+    border: 4px solid #f3f3f3;
+    border-top: 4px solid var(--primary-color);
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    animation: spin 1s linear infinite;
+    display: inline-block;
+    margin-right: 10px;
+}
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+
+/* ===== 9. NEWSLETTER SECTION ===== */
+.newsletter {
+    padding-top: 80px;
+    background-color: #f4f8fb;
+    text-align: center;
+    position: relative;
+}
+.newsletter-content {
+    max-width: 600px;
+    margin: 0 auto;
+    position: relative;
+    z-index: 2;
+    padding: 0 20px;
+}
+.newsletter h2 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: var(--primary-color);
+    margin-bottom: 15px;
+}
+.newsletter p {
+    font-size: 1.1rem;
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 30px;
+}
+.newsletter-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-bottom: 15px;
+}
+.newsletter-form input {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1rem;
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+}
+.newsletter-form input[type="email"] {
+    grid-column: 1 / -1;
+}
+.newsletter-form button {
+    grid-column: 1 / -1;
+    padding: 15px;
+    font-size: 1.1rem;
+}
+.newsletter p.terms {
+    font-size: 0.8rem;
+    color: #777;
+    margin-bottom: 80px;
+}
+.wave-footer {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 150px;
+    /* Ginamit ko ang bagong kulay mo para sa wave */
+    /*background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1440 320'%3E%3Cpath fill='%2307afa4' fill-opacity='1' d='M0,192L80,176C160,160,320,128,480,133.3C640,139,800,181,960,197.3C1120,213,1280,203,1360,197.3L1440,192L1440,320L1360,320C1280,320,1120,320,960,320C800,320,640,320,480,320C320,320,160,320,80,320L0,320Z'%3E%3C/path%3E%3C/svg%3E");
+    background-size: cover;*/
+    background-repeat: no-repeat;
+    z-index: 1;
+}
+
+/* ===== 10. FOOTER SECTION ===== */
+.footer {
+    background-color: var(--primary-color); /* BAGONG KULAY */
+    color: white;
+    padding: 120px 0 30px 0;
+    position: relative;
+    margin-top: -1px;
+}
+.footer-container {
+    width: 90%;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+.footer-top {
+    display: grid;
+    grid-template-columns: 1.5fr 3fr 1fr;
+    gap: 30px;
+    padding-bottom: 30px;
+}
+.footer-logo img { 
+    width: 200px; 
+    filter: brightness(0) invert(1); /* Para pumuti ang logo */
+}
+.footer-links {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+}
+.footer-links h4 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 15px;
+    opacity: 0.8;
+}
+.footer-links a {
+    display: block;
+    text-decoration: none;
+    color: white;
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 10px;
+    transition: opacity 0.3s ease;
+}
+.footer-links a:hover { opacity: 0.8; }
+.footer-social {
+    display: flex;
+    gap: 15px;
+    justify-content: flex-end;
+}
+.footer-social a {
+    color: white;
+    font-size: 3rem;
+    transition: opacity 0.3s ease;
+}
+.footer-social a:hover { opacity: 0.8; }
+.footer-divider {
+    border: 0;
+    height: 1px;
+    background-color: rgba(255, 255, 255, 0.2);
+}
+.footer-bottom {
+    display: flex;
+    justify-content: space-between;
+    padding: 30px 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.8);
+}
+.footer-bottom-links {
+    display: flex;
+    gap: 20px;
+}
+.footer-bottom-links a,
+.footer-bottom-links span {
+    text-decoration: none;
+    color: white;
+    font-weight: 600;
+}
+.footer-partners {
+    background: white;
+    border-radius: 10px;
+    padding: 15px;
+}
+.footer-partners p {
+    color: #555;
+}
+
+/* ===== WHATSAPP FLOAT BUTTON ===== */
+.whatsapp-float {
+    position: fixed;
+    width: 60px;
+    height: 60px;
+    bottom: 20px; 
+    right: 20px;
+    background-color: #25D366;
+    color: #FFF;
+    border-radius: 50px;
+    text-align: center;
+    font-size: 30px;
+    box-shadow: 2px 2px 6px rgba(0, 0, 0, 0.25);
+    z-index: 1000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    transition: transform 0.3s ease;
+}
+
+.whatsapp-float:hover {
+    transform: scale(1.1);
+}
+
+/* ============================================= */
+/* ===== AYOS PARA SA SLIDER ARROWS (BUTTONS) ===== */
+/* ============================================= */
+
+/* General style para sa LAHAT ng slick arrows */
+.slick-arrow {
+    font-size: 0; /* Itatago 'yung default text na "Next" */
+    width: 40px; /* Standard size */
+    height: 40px; /* Standard size */
+    border-radius: 50%;
+    z-index: 10;
+    transition: background-color 0.3s ease;
+    background-color: var(--primary-color); /* BAGONG KULAY */
+}
+
+.slick-arrow:hover {
+    background-color: var(--secondary-color); /* BAGONG KULAY */
+}
+
+/* Pag-istilo sa icon sa loob ng button */
+.slick-arrow::before {
+    font-family: 'FontAwesome';
+    color: white;
+    font-size: 16px; /* Standard icon size */
+    line-height: 1;
+    opacity: 1;
+    text-shadow: none; /* Alisin ang text shadow */
+}
+
+.slick-prev::before {
+    content: '\f053'; /* Icon para sa "left" */
+}
+
+.slick-next::before {
+    content: '\f054'; /* Icon para sa "right" */
+}
+
+/* Pwesto para sa HERO arrows (Nasa loob) */
+.hero .slick-prev {
+    left: 25px; 
+}
+.hero .slick-next {
+    right: 25px; 
+}
+
+/* Pwesto para sa IBANG sliders (Nasa labas) */
+.why-wadi .slick-prev,
+.events-celebrations .slick-prev,
+.visitors-speak .slick-prev {
+    left: -15px; 
+}
+
+.why-wadi .slick-next,
+.events-celebrations .slick-next,
+.visitors-speak .slick-next {
+    right: -15px; 
+}
+
+
+/* ============================================= */
+/* ===== RESPONSIVE STYLES ===== */
+/* ============================================= */
+
+/* Para sa tablets at mobile phones */
+@media (max-width: 900px) {
+
+    /* --- HEADER --- */
+    .header-top {
+        display: none; 
+    }
+    
+    .mobile-menu-toggle {
+        display: block; 
+    }
+
+    .main-nav .container {
+        justify-content: space-between;
+    }
+
+    .nav-links {
+        display: none; 
+        flex-direction: column;
+        width: 100%;
+        background-color: var(--primary-color-dark); 
+        padding: 20px 0;
+        text-align: center;
+        gap: 0;
+        order: 3; 
+        flex-basis: 100%;
+    }
+    
+    .nav-links.active {
+        display: flex; 
+    }
+
+    .nav-links li { width: 100%; }
+    .nav-links a {
+        padding: 15px 0;
+        display: block;
+        width: 100%;
+    }
+    .nav-links a:hover {
+        background-color: rgba(0,0,0,0.2);
+    }
+
+    /* Ayusin ang dropdown sa mobile */
+.nav-item-dropdown {
+    position: relative;
+}
+
+.nav-link-dropdown {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.dropdown-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background: #fff;
+    min-width: 200px;
+    display: none;
+    flex-direction: column;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+    z-index: 999;
+}
+
+.dropdown-menu a {
+    padding: 10px 15px;
+    text-decoration: none;
+    color: #333;
+    white-space: nowrap;
+}
+
+.dropdown-menu a:hover {
+    background-color: #f2f2f2;
+}
+
+/* 🔑 This is the key */
+.nav-item-dropdown:hover .dropdown-menu {
+    display: flex;
+}
+
+    /* Dulo ng mobile dropdown fix */
+
+    
+    .btn-book-now {
+        display: none;
+    }
+
+    /* --- HERO (WILD WADI STYLE) --- */
+    .hero {
+        padding-bottom: 80px; /* mas maliit na space sa mobile */
+        min-height: 450px;
+    }
+    
+    .hero-content {
+        padding-top: 80px;
+    }
+    .hero-content h1 {
+        font-size: 2.5rem;
+    }
+    .hero .slick-dots {
+        bottom: 100px; /* Itinaas para sa tabs */
+    }
+    .hero-gif {
+        width: 35%;
+    }
+    
+    /* --- TABS (WILD WADI STYLE) --- */
+    .tabs-wrapper {
+        width: 100%; /* Full width sa mobile */
+        bottom: 0; /* Idikit sa baba */
+    }
+    .tabs-container {
+        border-radius: 0; /* Walang radius sa mobile */
+        box-shadow: 0 -2px 10px rgba(0,0,0,0.1);
+    }
+    
+    .tab-buttons {
+        background: #f4f8fb; /* Match sa background */
+        box-shadow: none;
+        padding: 10px;
+        gap: 5px;
+    }
+    .tab-btn {
+        background: #fff;
+        color: var(--primary-color);
+        border-radius: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        padding: 10px 5px;
+        flex-direction: row; /* Balik sa row */
+        border-bottom: none;
+        border-top: none; 
+        flex: 1; /* Bagong sukat */
+    }
+    .tab-btn:first-child {
+        border-top-left-radius: 10px;
+        border-top-right-radius: 10px;
+    }
+    .tab-btn.active {
+        flex-grow: 3; /* Mas malaki ang active (3x vs 1x) */
+        background: var(--primary-color);
+        color: #fff;
+    }
+    .tab-btn.active i {
+        color: #fff;
+    }
+    .tab-btn:not(.active) span {
+        display: none; /* Tago ang text ng inactive */
+    }
+    .tab-btn.active span {
+        display: inline; /* Ipakita ang text ng active */
+    }
+    .tab-btn.active .mobile-arrow {
+        display: inline-block; /* Ipakita ang arrow */
+        font-size: 0.8rem;
+        transition: transform 0.3s ease;
+        transform: rotate(0deg); /* Naka-UP dapat by default */
+    }
+    .tab-btn:not(.active) .mobile-arrow {
+        display: none;
+    }
+    .tab-btn:not(.active) i {
+        font-size: 1.5rem; /* Icon lang */
+        margin: 0 auto; /* I-gitna */
+        color: var(--primary-color); /* Siguraduhin ang kulay */
+    }
+    .tab-btn.active i {
+        font-size: 1.1rem; /* Mas maliit na icon */
+    }
+    
+    /* ITO ANG LOGIC PARA SA MOBILE ACCORDION */
+    .tab-content {
+        display: none; /* Itago by default sa mobile */
+    }
+    .tab-content.mobile-visible {
+        display: block; /* Ipakita kapag active */
+    }
+    
+    .tab-panel[data-tab="1"],
+    .tab-panel[data-tab="2"] {
+        grid-template-columns: 1fr; /* Stack sa mobile */
+    }
+    .ticket-card {
+        flex-direction: row; /* Siguraduhin na row pa rin */
+    }
+    
+    .pass-grid {
+        grid-template-columns: 1fr;
+    }
+
+    /* --- Ibang Sections --- */
+    .adventure-features {
+        margin-top: 30px; /* Bawasan ang space sa mobile */
+        padding: 60px 0;
+    }
+    .exciting-events,
+    .why-wadi,
+    .events-celebrations,
+    .visitors-speak,
+    .ai-planner {
+        padding: 60px 0;
+    }
+
+    .adventure-features h2,
+    .exciting-events h2,
+    .why-wadi h2,
+    .events-celebrations h2,
+    .visitors-speak h2,
+    .newsletter h2,
+    .ai-planner h2 {
+        font-size: 2rem;
+    }
+
+    .features-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 30px;
+    }
+    .events-grid {
+        grid-template-columns: 1fr;
+    }
+    .review-platforms {
+        flex-direction: column;
+        align-items: center;
+    }
+    .platform-card {
+        width: 100%;
+        max-width: 350px;
+    }
+    .planner-inputs {
+        flex-direction: column;
+        gap: 10px;
+    }
+    .newsletter-form {
+        grid-template-columns: 1fr;
+    }
+
+    /* --- FOOTER --- */
+    .footer-top {
+        grid-template-columns: 1fr;
+        text-align: center;
+        gap: 40px;
+    }
+    .footer-logo { margin: 0 auto; }
+    .footer-links {
+        flex-direction: column;
+        gap: 30px;
+    }
+    .footer-social {
+        justify-content: center;
+        gap: 25px;
+    }
+    .footer-bottom {
+        flex-direction: column;
+        text-align: center;
+        gap: 20px;
+    }
+    .footer-bottom-links {
+        flex-direction: column;
+        gap: 10px;
+        justify-content: center;
+    }
+
+    /* --- SLIDER ARROWS (RESPONSIVE) --- */
+    /* Paliitin ang arrows sa hero */
+    .hero .slick-arrow {
+        width: 35px;
+        height: 35px;
+    }
+    .hero .slick-arrow::before {
+        font-size: 16px;
+    }
+    .hero .slick-prev { left: 10px; }
+    .hero .slick-next { right: 10px; }
+
+    /* Ilapit sa gilid ang arrows ng ibang sliders */
+    .why-wadi .slick-arrow,
+    .events-celebrations .slick-arrow,
+    .visitors-speak .slick-arrow {
+        width: 35px;
+        height: 35px;
+    }
+    .why-wadi .slick-prev,
+    .events-celebrations .slick-prev,
+    .visitors-speak .slick-prev {
+        left: 5px; 
+    }
+    .why-wadi .slick-next,
+    .events-celebrations .slick-next,
+    .visitors-speak .slick-next {
+        right: 5px; 
+    }
+}
+
+
+/* Para sa mas maliliit na mobile phones */
+@media (max-width: 480px) {
+    .hero-content h1 {
+        font-size: 2rem;
+    }
+    .hero-content p {
+        font-size: 1rem;
+    }
+
+    /* --- TABS (Mas maliit) --- */
+    .tab-btn {
+        padding: 10px;
+    }
+    .tab-btn i {
+        display: inline-block; 
+    }
+    .tab-btn:not(.active) i {
+        font-size: 1.3rem; /* Mas maliit pa */
+    }
+    
+    .hero .slick-dots {
+        bottom: 80px; /* Itaas pa */
+    }
+    
+    .features-grid {
+        grid-template-columns: 1fr; 
+    }
+
+    .adventure-features p,
+    .exciting-events p,
+    .why-wadi p,
+    .events-celebrations p,
+    .visitors-speak p,
+    .ai-planner p {
+        font-size: 1rem;
+    }
+    
+    .platform-card {
+        flex-direction: column;
+        text-align: center;
+    }
+    .platform-card a {
+        margin-left: 0;
+        margin-top: 10px;
+    }
+    
+    /* Paliitin pa lalo ang arrows sa ibang sliders */
+    .why-wadi .slick-arrow,
+    .events-celebrations .slick-arrow,
+    .visitors-speak .slick-arrow {
+        width: 30px;
+        height: 30px;
+    }
+    .why-wadi .slick-arrow::before,
+    .events-celebrations .slick-arrow::before,
+    .visitors-speak .slick-arrow::before {
+        font-size: 12px;
+    }
+}
+/* Ilagay ito sa loob ng <style> tag ng book.php */
+
+.ticket-item-image {
+    width: 80px;         /* Lapad ng picture */
+    height: 80px;        /* Taas ng picture */
+    border-radius: 10px; /* Bilo-gilid */
+    object-fit: cover;
+    margin-right: 15px;  /* Space sa pagitan ng picture at text */
+    flex-shrink: 0;      /* Para hindi lumiit ang picture */
+    border: 1px solid #eee;
+}
+
+.ticket-item-details {
+    flex-grow: 1; /* Ito ang pupuno sa natitirang space */
+}
+/* ============================================= */
+/* === BAGONG CSS PARA SA GRID VIEW CARDS === */
+/* ============================================= */
+
+/* Ito ang magse-setup ng 3-column grid */
+.ticket-grid-view {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr; /* 3 columns */
+    gap: 20px;
+    border-top: none; /* Alisin ang lumang border sa taas */
+}
+
+/* Ina-override nito ang lumang list-style para maging CARD */
+.ticket-grid-view .ticket-item {
+    display: flex;
+    flex-direction: column; /* Stack (vertical) ang content */
+    border: 1px solid #eee;
+    /* Alisin ang padding at border-bottom ng lumang style */
+    padding: 0; 
+    border-bottom: none; 
+    
+    border-radius: 15px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+    background: #fff;
+    overflow: hidden; /* Para sa image radius */
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ticket-grid-view .ticket-item:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 8px 15px rgba(0,0,0,0.1);
+}
+
+/* Ginagawang full-width card image */
+.ticket-grid-view .ticket-item-image {
+    width: 100%;
+    height: 180px; /* Mas mataas na image */
+    object-fit: cover;
+    border-radius: 0; /* Alisin ang radius, card na ang may radius */
+    margin-right: 0; /* Alisin ang margin */
+    border-bottom: 1px solid #eeeeee; /* Linya sa pagitan ng image at text */
+}
+
+/* Ginigitna ang text */
+.ticket-grid-view .ticket-item-details {
+    padding: 15px;
+    flex-grow: 1; /* Para pantay-pantay ang taas ng cards */
+    text-align: center;
+}
+
+/* Ginigitna ang quantity selector */
+.ticket-grid-view .qty-selector {
+    margin: 0 auto 15px auto; /* Gitna */
+}
+
+
+/* --- RESPONSIVE PARA SA GRID --- */
+
+/* 2-columns para sa tablet */
+@media (max-width: 900px) {
+    .ticket-grid-view {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+/* 1-column para sa mobile */
+@media (max-width: 600px) {
+    .ticket-grid-view {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* === BAGONG STYLE PARA SA MALINIS NA PRE-SELECT === */
+.ticket-item-clean {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px;
+    border: 1px solid #ddd;
+    border-radius: 15px;
+    background: #fdfdfd; /* Konting kulay para umangat */
+    box-shadow: 0 4px 10px rgba(0,0,0,0.05); /* Konting shadow */
+}
+.ticket-item-clean .ticket-item-details {
+    padding: 0; /* Alisin 'yung lumang padding */
+}
+.weather-icon {
+    font-size: 20px;
+    margin-right: 6px;
+    color: #ffffff;
+}
+
+/**ABOUT US HOVER INFO START**/
+.nav-item {
+  position: relative;
+  list-style: none;
+}
+
+.hover-box {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  
+  background: #333;
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  white-space: nowrap;
+
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.3s ease;
+  margin-top: 8px;
+}
+
+.nav-item:hover .hover-box {
+  opacity: 1;
+  visibility: visible;
+}
+/**ABOUT US HOVER INFO END**/
+
+
+
+/* ========================================= */
+/* == CLEANED TEAM & SKILLS STYLES == */
+/* ========================================= */
+
+/* General Section Fonts */
+.Section-Title {
+    font-family: 'Montserrat', 'Gotham-black', sans-serif;
+    color: #0b1a53;
+}
+
+/* --- Team Card Styling --- */
+.team-card {
+    background-color: #d0e8ff; /* Light Blue Card Background */
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+    /* IMPORTANT: No fixed width here. We let the HTML Grid handle the width */
+}
+
+.team-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 15px 25px rgba(0,0,0,0.1);
+}
+
+.card-shadow {
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+}
+
+/* --- Image Container --- */
+.team-image-container {
+    width: 100%;
+    height: 320px; /* Fixed height for uniformity */
+    overflow: hidden;
+    border-radius: 1rem; /* Rounded corners for image */
+    background-color: #cce0ff; /* Fallback color */
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    margin-bottom: 1rem;
+}
+
+.team-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover; /* Ensures image fills box without stretching face */
+    object-position: top center; /* Focuses on the face */
+    transition: transform 0.5s ease;
+}
+
+.team-card:hover .team-image {
+    transform: scale(1.05); /* Zoom effect on hover */
+}
+
+/* --- Text Info --- */
+.team-info {
+    padding: 10px 0;
+}
+
+/* --- Skills & Progress Bars --- */
+.progress-bar-container {
+    width: 100%;
+    background-color: #e5e7eb; /* Light Gray background */
+    border-radius: 9999px;
+    height: 12px; /* Slightly thicker for better visibility */
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.05);
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    border-radius: 9999px;
+    width: 0%; /* Start at 0 for animation if using JS, otherwise inline style sets it */
+    transition: width 1.5s ease-in-out;
+}
+
+/* Bar Colors */
+.progress-bar.blue { background-color: #3b82f6; }
+.progress-bar.green { background-color: #22c55e; }
+
+/* --- Mobile Adjustments --- */
+@media (max-width: 768px) {
+    .team-image-container {
+        height: 280px; /* Slightly shorter images on mobile to save space */
+    }
+}
+
+/* 1. Ito ang itsura ng links sa loob ng dropdown bago i-hover */
+.dropdown-menu a {
+    display: block;          /* Para sakop ang buong lapad */
+    padding: 10px 15px;      /* Spacing sa loob */
+    color: #2fe9ec;          /* Kulay ng text (Black/Dark Grey) */
+    text-decoration: none;   /* Tanggalin ang underline */
+    transition: 0.3s;        /* Smooth na pagpalit ng kulay */
+}
+
+/* 2. Ito ang "Highlight" - Kulay kapag tinututok ang mouse (Hover) */
+.dropdown-menu a:hover {
+    background-color: #14d4ff; /* BACKGROUND color (Gawing pula, blue, etc.) */
+    color: #ff0101;            /* TEXT color (Gawing puti para mabasa) */
+}
+
+.coming-soon-text {
+    font-size: 1.8em;
+    font-weight: 800;
+}
+
+
+
+
+
+

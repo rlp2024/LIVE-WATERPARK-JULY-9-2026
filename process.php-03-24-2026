@@ -1,0 +1,674 @@
+<?php
+// process.php - UNIFIED BOOKING & KIOSK PROCESSOR (WITH N-GENIUS)
+session_start();
+function getGuestPayloadForBooking(): array {
+    // Prefer guest_details if present
+    if (!empty($_SESSION['guest_details']) && is_array($_SESSION['guest_details'])) {
+        return [
+            'customer_name'  => $_SESSION['guest_details']['customer_name']  ?? null,
+            'customer_email' => $_SESSION['guest_details']['customer_email'] ?? null,
+            'customer_phone' => $_SESSION['guest_details']['customer_phone'] ?? null,
+            'phone_code'     => $_SESSION['guest_details']['phone_code']     ?? null,
+            'company_name'   => $_SESSION['guest_details']['company_name']   ?? null,
+            'nationality'    => $_SESSION['guest_details']['nationality']    ?? null,
+            'customer_type'  => $_SESSION['guest_details']['customer_type']  ?? null,
+        ];
+    }
+
+    // Fallback to $_SESSION['guest'] (ito ang gamit mo sa UI)
+    $g = $_SESSION['guest'] ?? [];
+    $first = trim($g['first_name'] ?? '');
+    $last  = trim($g['last_name'] ?? '');
+
+    return [
+        'customer_name'  => trim(($first . ' ' . $last)) ?: null,
+        'customer_email' => !empty($g['email']) ? trim($g['email']) : null,
+        'customer_phone' => !empty($g['phone']) ? trim((string)$g['phone']) : null,
+        'phone_code'     => !empty($g['phone_code']) ? trim($g['phone_code']) : null,
+        'company_name'   => (isset($g['company_name']) && trim($g['company_name']) !== '') ? trim($g['company_name']) : null,
+        'nationality'    => (isset($g['country']) && trim($g['country']) !== '') ? trim($g['country']) : null,
+        'customer_type'  => (isset($g['are_you']) && in_array($g['are_you'], ['visitor','residence'], true)) ? $g['are_you'] : null,
+    ];
+}
+
+include_once 'db_connect.php';
+include_once 'email_helper.php';
+
+date_default_timezone_set('Asia/Dubai');
+
+// ==============================================================================
+// [ADDED] CSRF + KIOSK FLAG (from checkout.php hidden fields)
+// ==============================================================================
+$isKioskCheckout = false;
+if ((isset($_POST['is_kiosk']) && $_POST['is_kiosk'] == '1') || (isset($_SESSION['kiosk_mode']) && $_SESSION['kiosk_mode'] === true)) {
+    $isKioskCheckout = true;
+    $_SESSION['kiosk_mode'] = true;
+}
+
+// CSRF validation only if token is present (won't break other legacy forms)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['csrf_token']) && !empty($_SESSION['csrf_token'])) {
+    if (!hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])) {
+        die("Invalid session token. Please refresh and try again.");
+    }
+}
+
+
+
+// ==============================================================================
+// 🔴 CONFIGURATION: N-GENIUS (NETWORK INTERNATIONAL)
+// ==============================================================================
+define('NGENIUS_API_KEY', 'NTc0MjQ4MGUtMTQ4OC00NzYzLTgxODktODgzYjQ3ZGZkZjQ2OjllMDVlMjczLWUxYjQtNDliZS04MDg1LWUyYmYyNmE5YTg3MQ=='); 
+define('NGENIUS_OUTLET_REF', '4a6f1b5e-610f-4440-8e3c-4fb6ddff7d1a'); 
+
+
+define('NGENIUS_AUTH_URL', 'https://api-gateway.ngenius-payments.com/identity/auth/access-token');
+define('NGENIUS_ORDER_URL', 'https://api-gateway.ngenius-payments.com/transactions/outlets/' . NGENIUS_OUTLET_REF . '/orders');
+
+//define('NGENIUS_AUTH_URL', 'https://api-gateway.sandbox.ngenius-payments.com/identity/auth/access-token');
+//define('NGENIUS_ORDER_URL', 'https://api-gateway.sandbox.ngenius-payments.com/transactions/outlets/' . NGENIUS_OUTLET_REF . '/orders');
+// LIVE URLs (Comment out sa taas, Uncomment ito pag live na):
+
+$YOUR_DOMAIN = 'https://ajmanwaterpark.com'; // Siguraduhing tama ito
+
+// ==============================================================================
+// 🟢 HELPER: GET N-GENIUS ACCESS TOKEN
+// ==============================================================================
+function getNGeniusAccessToken() {
+    $ch = curl_init();
+    $headers = [
+        "accept: application/vnd.ni-identity.v1+json",
+        "authorization: Basic " . NGENIUS_API_KEY,
+        "content-type: application/vnd.ni-identity.v1+json"
+    ];
+    curl_setopt($ch, CURLOPT_URL, NGENIUS_AUTH_URL);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    // curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // Uncomment if having SSL issues locally
+
+    $response = curl_exec($ch);
+    if(curl_errno($ch)) die('N-Genius Auth Error: ' . curl_error($ch));
+    curl_close($ch);
+
+    $data = json_decode($response, true);
+    return $data['access_token'] ?? null;
+}
+
+// ==============================================================================
+// 🟢 HELPER: CREATE N-GENIUS ORDER
+// ==============================================================================
+function createNGeniusOrder($token, $amount, $currency, $email, $redirectUrl, $cancelUrl) {
+    $minorAmount = (int)($amount * 100);
+
+    $postData = [
+        "action" => "SALE",
+        "amount" => [
+            "currencyCode" => $currency,
+            "value" => $minorAmount
+        ],
+        "emailAddress" => $email,
+        "merchantAttributes" => [
+            $cancelUrl   = "https://ajmanwaterpark.com/kiosk_home.php?reset=1",
+            "redirectUrl" => $redirectUrl,
+            "cancelUrl" => $cancelUrl,
+            "skipConfirmationPage" => true
+        ]
+    ];
+
+    $ch = curl_init();
+    $headers = [
+        "Authorization: Bearer " . $token,
+        "Content-Type: application/vnd.ni-payment.v2+json",
+        "Accept: application/vnd.ni-payment.v2+json"
+    ];
+
+    curl_setopt($ch, CURLOPT_URL, NGENIUS_ORDER_URL);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($postData));
+
+    $response = curl_exec($ch);
+    if(curl_errno($ch)) die('N-Genius Order Error: ' . curl_error($ch));
+    curl_close($ch);
+
+    return json_decode($response, true);
+}
+
+// ==============================================================================
+// 🔴 KIOSK INTERCEPTOR: HANDLES ADD-ON TOP-UPS FROM SCANNER
+// ==============================================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['kiosk_mode']) && $_POST['kiosk_mode'] == '1') {
+
+    if (!isset($_SESSION['admin_logged_in'])) {
+        // header("Location: admin_login.php"); exit; 
+    }
+
+    $bookingId = (int)$_POST['booking_id'];
+    $quantities = $_POST['qty'] ?? [];
+    $paymentMethod = $_POST['payment_method'] ?? 'cash';
+    $adminName = $_SESSION['admin_fullname'] ?? 'Kiosk User';
+
+    $isSelfService = isset($_SESSION['kiosk_mode']) && $_SESSION['kiosk_mode'] === true;
+
+    if ($isSelfService) {
+        $successRedirect = $YOUR_DOMAIN . '/success.php?booking_id=' . $bookingId . '&topup=1';
+        $cancelRedirect  = $YOUR_DOMAIN . '/kiosk_home.php';
+    } else {
+        $returnUrlFile = isset($_POST['return_url']) && !empty($_POST['return_url']) ? $_POST['return_url'] : 'admin_addon_scanner_base.php';
+        $successRedirect = $YOUR_DOMAIN . '/' . $returnUrlFile . '?booking_id=' . $bookingId . '&msg=topup_success';
+        $cancelRedirect  = $YOUR_DOMAIN . '/' . $returnUrlFile . '?booking_id=' . $bookingId;
+    }
+
+    if ($paymentMethod === 'card') {
+        try {
+            $totalAmount = 0;
+            $stmtPrice = $pdo->prepare("SELECT price FROM products WHERE product_id = ?");
+            foreach ($quantities as $pid => $qty) {
+                if ((int)$qty > 0) {
+                    $stmtPrice->execute([$pid]);
+                    $prod = $stmtPrice->fetch(PDO::FETCH_ASSOC);
+                    if ($prod) $totalAmount += ($prod['price'] * $qty);
+                }
+            }
+
+       if ($totalAmount <= 0) die("Error: No items selected or total is 0.");
+            
+            // Add 5% VAT for Kiosk Card Top-ups
+            $vatAmount = $totalAmount * 0.05;
+            $grandTotalTopup = $totalAmount + $vatAmount;
+
+            saveKioskTransaction($pdo, $bookingId, $quantities, 'pending_card', $adminName);
+
+            $token = getNGeniusAccessToken();
+            if (!$token) die("Payment Gateway Error: Unable to authenticate.");
+
+            // Charge the Grand Total (with VAT)
+            $orderResponse = createNGeniusOrder($token, $grandTotalTopup, 'AED', 'kiosk@ajmanwaterpark.com', $successRedirect, $cancelRedirect);
+
+
+            if (isset($orderResponse['_links']['payment']['href'])) {
+                header("Location: " . $orderResponse['_links']['payment']['href']);
+                exit;
+            } else {
+                echo "Payment Creation Failed: <br>";
+                print_r($orderResponse);
+                exit;
+            }
+
+        } catch (Exception $e) {
+            die("Error: " . $e->getMessage());
+        }
+    } else {
+        try {
+            saveKioskTransaction($pdo, $bookingId, $quantities, $paymentMethod, $adminName);
+            header("Location: " . $successRedirect);
+            exit;
+        } catch (Exception $e) {
+            die("Transaction Error: " . $e->getMessage());
+        }
+    }
+}
+
+// --- HELPER FUNCTION: SAVE TO DB AND SEND EMAIL ---
+function saveKioskTransaction($pdo, $bookingId, $quantities, $paymentMethod, $adminName) {
+
+    if ($pdo->inTransaction()) { } else { $pdo->beginTransaction(); }
+
+    try {
+        $totalAmount = 0;
+        $itemsSummary = [];
+        $purchasedItems = [];
+
+        $stmtPrice  = $pdo->prepare("SELECT name, price FROM products WHERE product_id = ?");
+        $stmtItem   = $pdo->prepare("INSERT INTO booking_items (booking_id, product_id, quantity, price_per_item) VALUES (?, ?, ?, ?)");
+
+        $stmtRedeem = $pdo->prepare("
+            INSERT INTO addon_redemptions (booking_id, product_id, unique_code, quantity_total, quantity_used, status) 
+            VALUES (?, ?, ?, ?, 0, 'unused') 
+            ON DUPLICATE KEY UPDATE quantity_total = quantity_total + VALUES(quantity_total), status = IF(quantity_total > quantity_used, 'unused', status)
+        ");
+
+        foreach ($quantities as $pid => $qty) {
+            $qty = (int)$qty;
+            if ($qty > 0) {
+                $stmtPrice->execute([$pid]);
+                $prod = $stmtPrice->fetch(PDO::FETCH_ASSOC);
+
+                if ($prod) {
+                    $price = $prod['price'];
+                    $name = $prod['name'];
+                    $subtotal = $price * $qty;
+                    $totalAmount += $subtotal;
+                    $itemsSummary[] = "$pid (x$qty)";
+
+                    $stmtItem->execute([$bookingId, $pid, $qty, $price]);
+                    $uniqueCode = $bookingId . '-' . $pid;
+                    $stmtRedeem->execute([$bookingId, $pid, $uniqueCode, $qty]);
+
+                    $purchasedItems[] = [
+                        'name' => $name, 'product_id' => $pid, 'quantity' => $qty, 'price' => $price, 'new_total' => null
+                    ];
+                }
+            }
+        }
+
+        if ($totalAmount > 0) {
+            $summaryStr = implode(", ", $itemsSummary);
+            $status = ($paymentMethod == 'pending_card') ? 'pending' : 'paid';
+
+          $vatAmount = $totalAmount * 0.05;
+            $grandTotalTopup = $totalAmount + $vatAmount;
+
+            $stmtLog = $pdo->prepare("INSERT INTO addon_purchase_logs (booking_id, action, payment_status, payment_method, total_amount, vat_amount, items_summary, created_by) VALUES (?, 'TOPUP', ?, ?, ?, ?, ?, ?)");
+            $stmtLog->execute([$bookingId, $status, $paymentMethod, $grandTotalTopup, $vatAmount, $summaryStr, $adminName]);
+
+            if ($status == 'paid') {
+                $pdo->prepare("UPDATE bookings SET total_amount = total_amount + ?, vat_amount = vat_amount + ? WHERE booking_id = ?")->execute([$grandTotalTopup, $vatAmount, $bookingId]);
+            }
+            
+            
+            
+        }
+
+        $pdo->commit();
+
+        if ($paymentMethod !== 'pending_card') {
+            $stmtCust = $pdo->prepare("SELECT customer_email, customer_name FROM bookings WHERE booking_id = ?");
+            $stmtCust->execute([$bookingId]);
+            $cust = $stmtCust->fetch(PDO::FETCH_ASSOC);
+            if ($cust && !empty($cust['customer_email']) && function_exists('sendAddonPurchaseReceipt')) {
+                sendAddonPurchaseReceipt($cust['customer_email'], $cust['customer_name'], $bookingId, $purchasedItems, $paymentMethod, $adminName);
+            }
+        }
+
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        throw $e;
+    }
+}
+// ==============================================================================
+// 🔴 END KIOSK INTERCEPTOR
+// ==============================================================================
+
+
+// ------------------------------------------------------------------------------
+// ORIGINAL LOGIC STARTS HERE (For Website Bookings)
+// ------------------------------------------------------------------------------
+
+// ==============================================================================
+// [ADDED] Smart redirect for kiosk checkout if guest/cart missing
+// ==============================================================================
+if ((empty($_SESSION['cart']) || empty($_SESSION['guest'])) && $isKioskCheckout) {
+    header('Location: checkout.php?mode=kiosk');
+    exit;
+}
+
+if (empty($_SESSION['cart']) || empty($_SESSION['guest'])) {
+    header('Location: book.php');
+    exit;
+}
+
+$topupForBookingId = isset($_SESSION['topup_for_booking_id']) ? (int)$_SESSION['topup_for_booking_id'] : 0;
+$isTopup = ($topupForBookingId > 0);
+
+$payment_method = $_POST['payment_method'] ?? 'card';
+$cart = $_SESSION['cart'];
+$user = $_SESSION['guest'];
+$total = $_SESSION['total_price'] ?? 0;
+$date = $_SESSION['booking_date'] ?? date('Y-m-d');
+$full_name = ($user['first_name'] ?? 'Guest') . ' ' . ($user['last_name'] ?? '');
+$discount_code = $_SESSION['discount_applied']['code'] ?? null;
+$discount_amount = $_SESSION['discount_applied']['amount'] ?? 0.00;
+
+
+// ==============================================================================
+// ✅ UPDATE: TOP-UP RULES
+// - Tabby: blocked always for topup
+// - Cash: allowed ONLY if kiosk checkout (kiosk buy add ons only.php -> checkout.php -> process.php)
+// ==============================================================================
+if ($isTopup && $payment_method === 'tabby') {
+    echo "Top-up purchases are available via Card only.";
+    exit;
+}
+
+if ($isTopup && $payment_method === 'cash') {
+
+    if (!$isKioskCheckout) {
+        echo "Cash top-up is available via Kiosk only.";
+        exit;
+    }
+
+    // Convert SESSION cart -> quantities[product_id] = qty
+    $quantities = [];
+    foreach ($cart as $item) {
+        $rawId = $item['id'] ?? '';
+        $pid = str_replace('prod_', '', $rawId);
+        if (ctype_digit((string)$pid)) {
+            $qty = (int)($item['quantity'] ?? 0);
+            if ($qty > 0) $quantities[(int)$pid] = $qty;
+        }
+    }
+
+    if (empty($quantities)) {
+        echo "Error: No add-ons selected.";
+        exit;
+    }
+
+    // Save topup directly to ORIGINAL booking (parent booking id)
+    $adminName = $_SESSION['admin_fullname'] ?? 'Kiosk Cashier';
+    saveKioskTransaction($pdo, $topupForBookingId, $quantities, 'cash', $adminName);
+
+    // Optional cleanup
+    unset($_SESSION['cart'], $_SESSION['discount_applied'], $_SESSION['total_price']);
+
+    header("Location: " . $YOUR_DOMAIN . "/success.php?topup=1&parent_booking_id=" . $topupForBookingId . "&cash=1");
+    exit;
+}
+
+
+try {
+
+    // ===============================================
+    // A. ONLINE TOP-UP FLOW (N-GENIUS)
+    // ===============================================
+    if ($isTopup) {
+        $calcTotal = 0;
+        foreach($cart as $item) {
+            $calcTotal += ($item['price'] * $item['quantity']);
+        }
+        $finalAmount = $calcTotal - $discount_amount;
+        if ($finalAmount < 0) $finalAmount = 0;
+
+        $token = getNGeniusAccessToken();
+        if (!$token) die("Payment Gateway Error.");
+
+        $successUrl = $YOUR_DOMAIN . '/success.php?topup=1&parent_booking_id=' . $topupForBookingId;
+        $cancelUrl  = $YOUR_DOMAIN . '/admin_verify_addons.php?booking_id=' . $topupForBookingId;
+
+        $orderResponse = createNGeniusOrder($token, $finalAmount, 'AED', $user['email'], $successUrl, $cancelUrl);
+
+        if (isset($orderResponse['_links']['payment']['href'])) {
+            header("Location: " . $orderResponse['_links']['payment']['href']);
+            exit;
+        } else {
+            die("Error creating payment order.");
+        }
+    }
+
+    // ===============================================
+    // B. MAIN BOOKING FLOW (Ticket Generation)
+    // ===============================================
+    $pdo->beginTransaction();
+
+    // 1. SAVE FACE IMAGE
+    $face_db_path = null;
+    if (isset($_SESSION['guest']['face_image']) && !empty($_SESSION['guest']['face_image'])) {
+        $img = $_SESSION['guest']['face_image'];
+        $img = str_replace('data:image/jpeg;base64,', '', $img);
+        $img = str_replace(' ', '+', $img);
+        $data = base64_decode($img);
+        if (!file_exists('uploads/faces/')) mkdir('uploads/faces/', 0777, true);
+        $fileName = 'face_' . time() . '_' . rand(1000,9999) . '.jpg';
+        if (file_put_contents('uploads/faces/' . $fileName, $data)) {
+            $face_db_path = $fileName;
+        }
+    }
+
+    $expiry_date = $_SESSION['expiry_date'] ?? null;
+
+    // ✅ SAFELY GET EMAIL + PHONE
+    $email = $_POST['email'] ?? ($_SESSION['user']['email'] ?? ($user['email'] ?? null));
+    $phone = $_POST['phone'] ?? ($_SESSION['user']['phone'] ?? ($user['phone'] ?? null));
+
+    $email = $email ? trim($email) : null;
+    $phone = $phone ? trim($phone) : null;
+
+    if (empty($email)) {
+        $email = 'kiosk_' . time() . '@ajmanwaterpark.local';
+    }
+
+    // Ensure session guest email is always filled
+    if (!isset($_SESSION['guest']['email']) || empty($_SESSION['guest']['email'])) {
+        $_SESSION['guest']['email'] = $email;
+        $user['email'] = $email;
+    }
+
+    $first_name   = trim($_POST['first_name'] ?? '');
+    $last_name    = trim($_POST['last_name'] ?? '');
+    $customer_name = trim($first_name . ' ' . $last_name);
+
+    $customer_email = trim($_POST['email'] ?? '');
+    $company_name   = trim($_POST['company_name'] ?? '');
+
+    $phone_code = trim($_POST['phone_code'] ?? '');
+    $allowed_codes = ['+971', '+63', '+1'];
+    if (!in_array($phone_code, $allowed_codes, true)) {
+        $phone_code = null; // or default '+971'
+    }
+
+    $customer_phone = preg_replace('/\D+/', '', $_POST['phone'] ?? ''); // digits only
+
+    $nationality = trim($_POST['country'] ?? '');
+
+    $customer_type = $_POST['are_you'] ?? null;
+    if (!in_array($customer_type, ['visitor', 'residence'], true)) {
+        $customer_type = null;
+    }
+
+    
+$vat_amount = $_SESSION['vat_amount'] ?? 0.00;
+
+    $stmt = $pdo->prepare("INSERT INTO bookings
+        (customer_name, customer_email, customer_phone, total_amount, discount_code, discount_amount, vat_amount, visit_date, expiry_date, payment_status, payment_method, face_image_path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NOW())");
+
+    $stmt->execute([
+        trim($full_name),
+        $email,
+        $phone,
+        $total, // This is already the Grand Total from checkout
+        $discount_code,
+        $discount_amount,
+        $vat_amount,
+        $date,
+        $expiry_date,
+        $payment_method,
+        $face_db_path
+    ]);
+    
+
+    $booking_id = $pdo->lastInsertId();
+
+    // =============================
+    // SAVE GUEST DETAILS (detail.php)
+    // =============================
+    $first = trim($_POST['first_name'] ?? '');
+    $last  = trim($_POST['last_name'] ?? '');
+    $email = trim($_POST['email'] ?? ($user['email'] ?? ''));
+    $company = trim($_POST['company_name'] ?? '');
+    $phone_code = trim($_POST['phone_code'] ?? '');
+    $phone = trim($_POST['phone'] ?? '');
+    $country = trim($_POST['country'] ?? '');
+    $are_you = trim($_POST['are_you'] ?? '');
+
+    $full_phone = trim(($phone_code ? $phone_code . ' ' : '') . $phone);
+
+    // Fallback to session guest values (important for kiosk checkout)
+    if ($first === '')   $first   = trim($user['first_name'] ?? '');
+    if ($last === '')    $last    = trim($user['last_name'] ?? '');
+    if ($email === '')   $email   = trim($user['email'] ?? '');
+    if ($phone === '')   $phone   = trim($user['phone'] ?? '');
+    if ($country === '') $country = trim($user['country'] ?? '');
+
+    if ($booking_id > 0 && $first !== '' && $last !== '' && $email !== '') {
+        try {
+            $stmtGD = $pdo->prepare("
+                INSERT INTO guest_details
+                    (booking_id, first_name, last_name, email, company_name, phone_code, phone, country, are_you, created_at, updated_at)
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE
+                    first_name=VALUES(first_name),
+                    last_name=VALUES(last_name),
+                    email=VALUES(email),
+                    company_name=VALUES(company_name),
+                    phone_code=VALUES(phone_code),
+                    phone=VALUES(phone),
+                    country=VALUES(country),
+                    are_you=VALUES(are_you),
+                    updated_at=NOW()
+            ");
+            $stmtGD->execute([
+                $booking_id,
+                $first,
+                $last,
+                $email,
+                $company,
+                $phone_code,
+                $full_phone,
+                $country,
+                $are_you
+            ]);
+        } catch (Exception $e) {
+            // optional: error_log("Guest save error: " . $e->getMessage());
+        }
+    }
+    // END SAVE GUEST DETAILS
+
+    if ($discount_code) {
+        $stmtUpdateDiscount = $pdo->prepare("UPDATE discount_codes SET usage_count = usage_count + 1 WHERE code = ?");
+        $stmtUpdateDiscount->execute([$discount_code]);
+    }
+
+    // 3. INSERT ITEMS & GENERATE TICKETS
+    $stmt_item = $pdo->prepare("INSERT INTO booking_items (booking_id, product_id, quantity, price_per_item) VALUES (?, ?, ?, ?)");
+    $stmt_tkt  = $pdo->prepare("INSERT INTO ticket_instances (booking_id, ticket_code, ticket_type, status) VALUES (?, ?, ?, 'unused')");
+
+    // Add-on redemption auto-create for main booking (category_id = 6)
+    $stmtProdCat = $pdo->prepare("SELECT category_id FROM products WHERE product_id = ? LIMIT 1");
+    $stmtRedeemMain = $pdo->prepare("
+        INSERT INTO addon_redemptions (booking_id, product_id, unique_code, quantity_total, quantity_used, status) 
+        VALUES (?, ?, ?, ?, 0, 'unused') 
+        ON DUPLICATE KEY UPDATE 
+            quantity_total = quantity_total + VALUES(quantity_total),
+            status = IF(quantity_total > quantity_used, 'unused', status)
+    ");
+
+    $ticket_seq = 1;
+
+    foreach($cart as $item) {
+        $rawId = $item['id'];
+        $db_save_id = str_replace('prod_', '', $rawId);
+
+        $stmt_item->execute([$booking_id, $db_save_id, $item['quantity'], $item['price']]);
+
+        // If item is an ADD-ON (category_id=6), create/extend redemption record
+        if (ctype_digit((string)$db_save_id)) {
+            $stmtProdCat->execute([$db_save_id]);
+            $catRow = $stmtProdCat->fetch(PDO::FETCH_ASSOC);
+            if ($catRow && (int)$catRow['category_id'] === 6) {
+                $uniqueCode = $booking_id . '-' . $db_save_id;
+                $stmtRedeemMain->execute([$booking_id, $db_save_id, $uniqueCode, (int)$item['quantity']]);
+            }
+        }
+
+        // Ticket Generation Logic
+        $isTicket = false;
+        if (strpos($rawId, 'type_') === 0) { $isTicket = true; }
+        elseif (in_array($db_save_id, ['DP-RES', 'DP-NON', 'AP1', 'AP2', 'AP3', '1'])) { $isTicket = true; }
+
+        if ($isTicket) {
+            $qty = (int)$item['quantity'];
+            for ($i = 0; $i < $qty; $i++) {
+                $unique_code = $booking_id . '-' . str_pad($ticket_seq, 2, '0', STR_PAD_LEFT) . '-' . strtoupper(substr(md5(uniqid()), 0, 3));
+                $stmt_tkt->execute([$booking_id, $unique_code, $item['name']]);
+                $ticket_seq++;
+            }
+        }
+    }
+
+    $guest = getGuestPayloadForBooking();
+
+// If required guest fields missing, stop safely
+if (empty($guest['customer_email']) || empty($guest['customer_name'])) {
+    // go back safely (do not proceed to payment)
+    header("Location: details.php");
+    exit;
+}
+
+// SAFE UPDATE: only fills NULL/empty fields (won't overwrite existing non-empty data)
+$upd = $pdo->prepare("
+    UPDATE bookings SET
+        customer_name  = CASE WHEN customer_name IS NULL OR customer_name = '' THEN :customer_name ELSE customer_name END,
+        customer_email = CASE WHEN customer_email IS NULL OR customer_email = '' THEN :customer_email ELSE customer_email END,
+        customer_phone = CASE WHEN customer_phone IS NULL OR customer_phone = '' THEN :customer_phone ELSE customer_phone END,
+        phone_code     = CASE WHEN phone_code IS NULL OR phone_code = '' THEN :phone_code ELSE phone_code END,
+        company_name   = CASE WHEN company_name IS NULL OR company_name = '' THEN :company_name ELSE company_name END,
+        nationality    = CASE WHEN nationality IS NULL OR nationality = '' THEN :nationality ELSE nationality END,
+        customer_type  = CASE WHEN customer_type IS NULL OR customer_type = '' THEN :customer_type ELSE customer_type END
+    WHERE booking_id = :booking_id
+");
+
+$upd->execute([
+    ':customer_name'  => $guest['customer_name'],
+    ':customer_email' => $guest['customer_email'],
+    ':customer_phone' => $guest['customer_phone'],
+    ':phone_code'     => $guest['phone_code'],
+    ':company_name'   => $guest['company_name'],
+    ':nationality'    => $guest['nationality'],
+    ':customer_type'  => $guest['customer_type'],
+    ':booking_id'     => $booking_id,
+]);
+
+
+    // 4. PAYMENT ROUTING
+
+    // CASH FLOW (KIOSK / OFFLINE) - mark as paid and redirect success
+    if ($payment_method === 'cash') {
+        $pdo->prepare("UPDATE bookings SET payment_status = 'paid' WHERE booking_id = ?")->execute([$booking_id]);
+
+        $pdo->commit();
+        header("Location: " . $YOUR_DOMAIN . "/success.php?booking_id=" . $booking_id . "&cash=1");
+        exit;
+    }
+
+    if ($payment_method === 'tabby') {
+        $pdo->commit();
+        header("Location: tabby_simulator.php?booking_id=" . $booking_id . "&amount=" . $total);
+        exit;
+
+    } else {
+        // --- N-GENIUS FLOW (MAIN BOOKING) ---
+        $pdo->commit();
+
+        $token = getNGeniusAccessToken();
+        if (!$token) die("Payment Gateway Connection Error");
+
+        $successUrl = $YOUR_DOMAIN . '/success.php?booking_id=' . $booking_id;
+        $cancelUrl  = $YOUR_DOMAIN . '/book.php?error=payment_cancelled';
+
+        $orderResponse = createNGeniusOrder($token, $total, 'AED', $user['email'], $successUrl, $cancelUrl);
+
+        if (isset($orderResponse['_links']['payment']['href'])) {
+
+            if (isset($orderResponse['reference'])) {
+                $ref = $orderResponse['reference'];
+                // $pdo->query("UPDATE bookings SET transaction_id = '$ref' WHERE booking_id = $booking_id");
+            }
+
+            header("Location: " . $orderResponse['_links']['payment']['href']);
+            exit;
+        } else {
+            echo "Failed to initiate payment. <br>";
+            print_r($orderResponse);
+            exit;
+        }
+    }
+
+} catch (Exception $e) {
+    if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
+    echo "System Error: " . $e->getMessage();
+    exit;
+}
+?>

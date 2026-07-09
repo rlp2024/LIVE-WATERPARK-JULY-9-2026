@@ -1,0 +1,282 @@
+<?php
+session_start();
+include_once 'db_connect.php';
+include_once 'admin_audit.php';
+
+// ===============================
+// 1. PHP LOGIN LOGIC
+// ===============================
+$error = "";
+$show_modal = false; // Default: nakatago ang login box
+
+// Check kung naka-login na
+$is_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
+$admin_name = $_SESSION['admin_fullname'] ?? 'Staff';
+
+// Handle Logout Request via URL parameter (optional shortcut)
+if (isset($_GET['action']) && $_GET['action'] == 'logout') {
+    session_destroy();
+    header("Location: admin_scanner_select.php");
+    exit;
+}
+
+// Check for session expired message from dashboard
+if (isset($_GET['msg'])) {
+    $error = htmlspecialchars($_GET['msg']);
+    $show_modal = true;
+}
+
+// Handle Login Form Submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['login_attempt'])) {
+    
+    $user = trim($_POST['username'] ?? '');
+    $pass = trim($_POST['password'] ?? '');
+
+    if ($user === '' || $pass === '') {
+        $error = "Please enter username and password.";
+        $show_modal = true; // Buksan ang modal para makita ang error
+    } else {
+        $stmt = $pdo->prepare("SELECT * FROM admins WHERE username = ? LIMIT 1");
+        $stmt->execute([$user]);
+        $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($admin && $admin['password'] === $pass) {
+            // Login Success
+            $_SESSION['admin_id']              = $admin['admin_id'];
+            $_SESSION['admin_logged_in']       = true;
+            $_SESSION['admin_user']            = $admin['username'];
+            $_SESSION['admin_role']            = $admin['role'];
+            $_SESSION['admin_fullname']        = $admin['full_name'];
+            
+            // NEW: Store password hash for auto-logout feature
+            $_SESSION['admin_password_hash']   = $admin['password'];
+
+            // Log Success
+            if (empty($_SESSION['login_logged'])) {
+                adminAuthLog($pdo, 'LOGIN', $admin);
+                $_SESSION['login_logged'] = 1;
+            }
+
+            // Redirect based on role (Boss and User go to Dashboard, Staff goes to Scanners)
+            if ($admin['role'] === 'boss' || $admin['role'] === 'user') {
+                header("Location: admin_dashboard.php");
+            } else {
+                header("Location: admin_scanner_select.php");
+            }
+            exit;
+        } else {
+            // Login Failed
+            adminAuthLog($pdo, 'FAILED_LOGIN', ['username' => $user]);
+            $error = "Invalid Username or Password";
+            $show_modal = true; // Buksan ang modal para makita ang error
+        }
+    }
+}
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Kiosk - Ajman Water Park</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;700;800&display=swap" rel="stylesheet">
+    <link rel="shortcut icon" href="/awpfav.png" type="image/x-icon">
+
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; font-family: 'Poppins', sans-serif;
+            background: #32BFB6; color: white;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh; text-align: center; padding: 20px;
+        }
+
+        .kiosk-container {
+            width: 100%; max-width: 900px;
+            display: flex; flex-direction: column;
+            align-items: center; gap: 25px;
+        }
+
+        h1 {
+            font-size: clamp(2.2rem, 5vw, 3.5rem); font-weight: 800;
+            letter-spacing: 4px; text-transform: uppercase;
+            text-shadow: 0 4px 10px rgba(0,0,0,0.25); margin: 0;
+        }
+        h3 { font-weight: 600; margin-top: -20px; opacity: 0.9; }
+        .logo { width: clamp(180px, 40vw, 300px); height: auto; }
+
+        .btn-group {
+            display: flex; justify-content: center; gap: 30px; flex-wrap: wrap;
+        }
+
+        .kiosk-btn {
+            background: white; color: #003B72; border: none;
+            width: clamp(220px, 70vw, 300px); height: clamp(220px, 70vw, 300px);
+            border-radius: 20px; font-size: clamp(1.2rem, 3vw, 2rem);
+            font-weight: 700; cursor: pointer;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            text-decoration: none; transition: 0.25s;
+            box-shadow: 0 7px 0 rgba(0, 0, 0, .5);
+        }
+        .kiosk-btn i { font-size: clamp(3rem, 8vw, 5rem); margin-bottom: 15px; }
+        .kiosk-btn:hover { background: #00d5ea; }
+        .kiosk-btn:active { transform: translateY(10px); box-shadow: none; }
+        .kiosk-btn.logout { color: #c0392b; }
+        .kiosk-btn.logout:hover { background: #ffcccc; }
+
+        /* ============================ */
+        /* MODAL STYLES (Pop-up Login)  */
+        /* ============================ */
+        .modal {
+            display: none; /* Hidden by default */
+            position: fixed; z-index: 1000;
+            left: 0; top: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.6); /* Black w/ opacity */
+            backdrop-filter: blur(5px);
+            justify-content: center; align-items: center;
+        }
+
+        .modal-content {
+            background-color: white; color: #003B72;
+            padding: 40px; border-radius: 15px;
+            width: 90%; max-width: 400px;
+            position: relative;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            animation: slideDown 0.3s ease-out;
+        }
+
+        @keyframes slideDown {
+            from { transform: translateY(-50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .close-btn {
+            position: absolute; top: 15px; right: 20px;
+            color: #aaa; font-size: 28px; font-weight: bold;
+            cursor: pointer;
+        }
+        .close-btn:hover { color: red; }
+
+        /* Login Form Styles inside Modal */
+        .login-input {
+            width: 100%; padding: 15px; margin: 10px 0;
+            border: 2px solid #ddd; border-radius: 8px;
+            font-size: 1.1rem; box-sizing: border-box;
+            background: #f9f9f9;
+        }
+        .login-input:focus { border-color: #003B72; outline: none; }
+        
+        .login-submit {
+            width: 100%; padding: 15px; background: #003B72;
+            color: white; border: none; border-radius: 8px;
+            font-size: 1.2rem; font-weight: bold; cursor: pointer;
+            margin-top: 10px; transition: 0.3s;
+        }
+        .login-submit:hover { background: #002855; }
+        .error-msg { color: red; font-size: 0.9rem; margin-bottom: 10px; display: block; }
+
+        .kiosk-btn {
+            display: flex;
+            flex-direction: column;        /* stack icon + text */
+            justify-content: center;        /* vertical center */
+            align-items: center;            /* horizontal center */
+            height: 200px;                  /* adjust to your button size */
+            width: 260px;
+            text-align: center;
+            gap: 6px;                       /* spacing between lines */
+        }
+
+        .kiosk-btn i {
+            font-size: 50px;
+            margin-bottom: 6px;
+        }
+
+        .kiosk-btn .line {
+            font-size: 25px;
+            font-weight: bold;
+            line-height: 1;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div class="kiosk-container">
+
+        <?php if (!$is_logged_in): ?>
+            <h1>Welcome</h1>
+            <img src="Images/kiosk-logo.webp" class="logo" alt="Ajman Water Park">
+
+            <div class="btn-group">
+                <button onclick="openLoginModal()" class="kiosk-btn">
+                    <i class="fas fa-sign-in-alt"></i>
+                    <span class="line">EMPLOYEE</span>
+                    <span class="line">LOGIN</span>
+                </button>
+            </div>
+
+        <?php else: ?>
+            <h1>Welcome</h1>
+            <h3><?php echo htmlspecialchars($admin_name); ?></h3>
+            <img src="Images/kiosk-logo.webp" class="logo" alt="Ajman Water Park">
+
+            <div class="btn-group">
+                <a href="admin_scanner_select.php" class="kiosk-btn">
+                    <i class="fas fa-qrcode"></i><span class="line">SELECT</span><span class="line">SCANNER</span>
+                </a>
+                <a href="admin_logout.php" class="kiosk-btn logout">
+                    <i class="fas fa-sign-out-alt"></i><span class="line">LOGOUT</span>
+                </a>
+            </div>
+        <?php endif; ?>
+
+    </div>
+
+    <div id="loginModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeLoginModal()">&times;</span>
+            <h2 style="margin-top: 0;">Employee Access</h2>
+            
+            <?php if ($error): ?>
+                <span class="error-msg"><?php echo htmlspecialchars($error); ?></span>
+            <?php endif; ?>
+
+            <form method="POST" autocomplete="off">
+                <input type="hidden" name="login_attempt" value="1">
+                <input type="text" name="username" class="login-input" placeholder="Username" required autofocus>
+                <input type="password" name="password" class="login-input" placeholder="Password" required>
+                <button type="submit" class="login-submit">LOGIN</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // Function to open modal
+        function openLoginModal() {
+            document.getElementById('loginModal').style.display = 'flex';
+        }
+
+        // Function to close modal
+        function closeLoginModal() {
+            document.getElementById('loginModal').style.display = 'none';
+        }
+
+        // Close modal if user clicks outside the white box
+        window.onclick = function(event) {
+            var modal = document.getElementById('loginModal');
+            if (event.target == modal) {
+                modal.style.display = "none";
+            }
+        }
+
+        // Check if PHP wants us to show the modal (e.g., after wrong password or session expiry)
+        <?php if ($show_modal): ?>
+            openLoginModal();
+        <?php endif; ?>
+    </script>
+
+</body>
+</html>
