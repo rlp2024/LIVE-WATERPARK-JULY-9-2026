@@ -1,0 +1,1575 @@
+<?php
+session_start();
+include_once 'db_connect.php';
+include_once 'email_helper.php';
+
+// Set Timezone
+date_default_timezone_set('Asia/Dubai');
+
+// Security Check
+if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
+    header("Location: admin_login.php");
+    exit;
+}
+
+$message = "";
+$messageType = "";
+$booking = null;
+$scannedTicketCode = null;
+$ticketStatus = "";
+$orderItems = [];
+$isAnnualPass = false;
+$autoStartFace = false;
+
+// NEW: Keep the booking details on screen after admitting a ticket
+if (isset($_GET['retained_id'])) {
+    $_POST['booking_id'] = $_GET['retained_id'];
+    $_SERVER['REQUEST_METHOD'] = 'POST';
+}
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+
+    // =========================================================
+    // A. SEARCH / SCAN LOGIC
+    // =========================================================
+    if (isset($_POST['booking_id'])) {
+        $input = trim($_POST['booking_id']);
+
+        if (preg_match('/^\d+\-ADD\d+$/i', $input)) {
+            $message = "ADD-ON QR DETECTED. NOT VALID IN GATE SCANNER.";
+            $messageType = "error";
+        } else {
+
+            $stmtTix = $pdo->prepare("SELECT * FROM ticket_instances WHERE ticket_code = ?");
+            $stmtTix->execute([$input]);
+            $specificTicket = $stmtTix->fetch(PDO::FETCH_ASSOC);
+
+            if ($specificTicket) {
+                $scannedTicketCode = $specificTicket['ticket_code'];
+                $id = $specificTicket['booking_id'];
+
+                if ($specificTicket['is_used'] == 1) {
+                    $message = "TICKET ALREADY USED!";
+                    $messageType = "used";
+                    $ticketStatus = "used";
+                } else {
+                    $message = "VALID TICKET SCANNED.";
+                    $messageType = "success";
+                    $ticketStatus = "valid";
+                }
+            } else {
+                $id = $input;
+            }
+
+            $stmt = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+            $stmt->execute([$id]);
+            $booking = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$booking) {
+                $message = "ID / CODE #$input NOT FOUND.";
+                $messageType = "error";
+            } else {
+                $stmt_items = $pdo->prepare("SELECT p.name, p.product_id, bi.quantity, bi.price_per_item as price FROM booking_items bi JOIN products p ON bi.product_id = p.product_id WHERE bi.booking_id = ?");
+                $stmt_items->execute([$id]);
+                $orderItems = $stmt_items->fetchAll(PDO::FETCH_ASSOC);
+
+                foreach ($orderItems as $item) {
+                    if (in_array($item['product_id'], ['AP1', 'AP2', 'AP3'])) {
+                        $isAnnualPass = true;
+                        break;
+                    }
+                }
+
+                if (!$scannedTicketCode && !$isAnnualPass) {
+                    $message = "BOOKING ID SCANNED. PLEASE SCAN OTHER TICKET QRs.";
+                    $messageType = "info";
+                }
+
+                $check_today = date('Y-m-d');
+                $check_visit_date = date('Y-m-d', strtotime($booking['visit_date']));
+
+                if ($booking['payment_status'] !== 'paid') {
+                    $message = "❌ PAYMENT PENDING / UNPAID";
+                    $messageType = "error";
+                    $scannedTicketCode = null;
+                    $ticketStatus = "error";
+                } elseif (!$isAnnualPass && $check_visit_date !== $check_today) {
+                    $message = "⛔ WRONG DATE! Scheduled for: " . $check_visit_date;
+                    $messageType = "error";
+                    $scannedTicketCode = null;
+                    $ticketStatus = "error";
+                } elseif ($isAnnualPass && $booking['expiry_date'] < $check_today) {
+                    $message = "⛔ MEMBERSHIP EXPIRED";
+                    $messageType = "error";
+                    $autoStartFace = false;
+                }
+
+                $today = date('Y-m-d');
+                $last_used = $booking['redeemed_at'] ? date('Y-m-d', strtotime($booking['redeemed_at'])) : '';
+
+                if (
+                    $isAnnualPass &&
+                    $booking['payment_status'] == 'paid' &&
+                    !empty($booking['face_image_path']) &&
+                    $last_used != $today &&
+                    $booking['expiry_date'] >= $today &&
+                    $messageType != 'error'
+                ) {
+                    $autoStartFace = true;
+                }
+            }
+        }
+    }
+
+    // =========================================================
+    // B. REDEEM LOGIC (BATCH SUPPORT — multiple tickets)
+    // =========================================================
+    if (isset($_POST['redeem_id']) || (isset($_POST['redeem_ids']) && is_array($_POST['redeem_ids']))) {
+
+        $target_ids = [];
+        if (isset($_POST['redeem_ids']) && is_array($_POST['redeem_ids'])) {
+            $target_ids = array_filter(array_map('trim', $_POST['redeem_ids']));
+        } elseif (isset($_POST['redeem_id'])) {
+            $target_ids = [trim($_POST['redeem_id'])];
+        }
+
+        $admin_who_scanned = $_SESSION['admin_fullname'];
+        $successful_ticket_codes = [];
+        $successful_booking_ids  = [];
+        $booking_id_for_email    = 0;
+        $error_messages          = [];
+
+        foreach ($target_ids as $target_id) {
+            if ($target_id === '') continue;
+
+            if (preg_match('/^\d+\-ADD\d+$/i', $target_id)) {
+                $error_messages[] = "ADD-ON QR ($target_id) — not valid sa gate.";
+                continue;
+            }
+
+            $stmtIsTix = $pdo->prepare("SELECT * FROM ticket_instances WHERE ticket_code = ?");
+            $stmtIsTix->execute([$target_id]);
+            $ticketRow = $stmtIsTix->fetch(PDO::FETCH_ASSOC);
+
+            if ($ticketRow) {
+                $db_chk = $pdo->prepare("SELECT visit_date, payment_status FROM bookings WHERE booking_id = ?");
+                $db_chk->execute([$ticketRow['booking_id']]);
+                $db_res = $db_chk->fetch(PDO::FETCH_ASSOC);
+
+                if (!$db_res || $db_res['payment_status'] !== 'paid' || date('Y-m-d', strtotime($db_res['visit_date'])) !== date('Y-m-d')) {
+                    $error_messages[] = "Ticket $target_id: WRONG DATE / UNPAID.";
+                    continue;
+                }
+
+                if ($ticketRow['is_used'] != 0) {
+                    $error_messages[] = "Ticket $target_id: already used.";
+                    continue;
+                }
+
+                $updateTix = $pdo->prepare("UPDATE ticket_instances SET is_used = 1, used_at = NOW(), scanned_by = ? WHERE ticket_code = ? AND is_used = 0");
+                $updateTix->execute([$admin_who_scanned, $target_id]);
+
+                if ($updateTix->rowCount() > 0) {
+                    $booking_id_for_email = $ticketRow['booking_id'];
+                    $successful_ticket_codes[] = $target_id;
+
+                    $updateBooking = $pdo->prepare("UPDATE bookings SET is_redeemed = 1, redeemed_by = ?, redeemed_at = NOW() WHERE booking_id = ? AND is_redeemed = 0");
+                    $updateBooking->execute([$admin_who_scanned, $booking_id_for_email]);
+
+                    $stmtLog = $pdo->prepare("INSERT INTO pass_visits (booking_id, visit_date, scanned_by) VALUES (?, NOW(), ?)");
+                    $stmtLog->execute([$booking_id_for_email, "$admin_who_scanned (TICKET: $target_id)"]);
+                } else {
+                    $error_messages[] = "Ticket $target_id: just scanned by another staff!";
+                }
+
+            } else {
+                $stmtCheck = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+                $stmtCheck->execute([$target_id]);
+                $checkRow = $stmtCheck->fetch(PDO::FETCH_ASSOC);
+
+                if (!$checkRow) {
+                    $error_messages[] = "Booking $target_id: not found.";
+                    continue;
+                }
+
+                $today_chk = date('Y-m-d');
+                $last_used_chk = $checkRow['redeemed_at'] ? date('Y-m-d', strtotime($checkRow['redeemed_at'])) : '';
+
+                $is_AP = false;
+                $stmt_i = $pdo->prepare("SELECT product_id FROM booking_items WHERE booking_id = ?");
+                $stmt_i->execute([$target_id]);
+                $prods = $stmt_i->fetchAll(PDO::FETCH_COLUMN);
+                if (array_intersect($prods, ['AP1', 'AP2', 'AP3'])) $is_AP = true;
+
+                if ($is_AP && $last_used_chk == $today_chk) {
+                    $error_messages[] = "Booking $target_id: already entered today.";
+                    continue;
+                }
+                if ($checkRow['expiry_date'] < $today_chk || $checkRow['payment_status'] !== 'paid') {
+                    $error_messages[] = "Booking $target_id: expired/unpaid.";
+                    continue;
+                }
+
+                $stmt = $pdo->prepare("UPDATE bookings SET is_redeemed = 1, redeemed_by = ?, redeemed_at = NOW() WHERE booking_id = ?");
+                $stmt->execute([$admin_who_scanned, $target_id]);
+
+                $stmtLog = $pdo->prepare("INSERT INTO pass_visits (booking_id, visit_date, scanned_by) VALUES (?, NOW(), ?)");
+                $stmtLog->execute([$target_id, $admin_who_scanned]);
+
+                $booking_id_for_email = $target_id;
+                $successful_booking_ids[] = $target_id;
+            }
+        }
+
+        $totalSuccess = count($successful_ticket_codes) + count($successful_booking_ids);
+
+        if ($totalSuccess > 0 && $booking_id_for_email > 0) {
+            $stmtDetails = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+            $stmtDetails->execute([$booking_id_for_email]);
+            $detailsRow = $stmtDetails->fetch(PDO::FETCH_ASSOC);
+
+            $stmtItms = $pdo->prepare("SELECT p.name, p.product_id, bi.quantity, bi.price_per_item as price FROM booking_items bi JOIN products p ON bi.product_id = p.product_id WHERE bi.booking_id = ?");
+            $stmtItms->execute([$booking_id_for_email]);
+            $emailItems = $stmtItms->fetchAll(PDO::FETCH_ASSOC);
+
+            if (!empty($detailsRow['customer_email'])) {
+                if (count($successful_ticket_codes) === 1) {
+                    sendEntryReceipt(
+                        $detailsRow['customer_email'], $detailsRow['customer_name'],
+                        $booking_id_for_email, $detailsRow, $emailItems, $admin_who_scanned,
+                        ['validated_ticket_code' => reset($successful_ticket_codes), 'validated_label' => 'VALIDATED']
+                    );
+                } elseif (count($successful_ticket_codes) > 1) {
+                    sendEntryReceipt(
+                        $detailsRow['customer_email'], $detailsRow['customer_name'],
+                        $booking_id_for_email, $detailsRow, $emailItems, $admin_who_scanned,
+                        ['validated_ticket_codes' => array_values($successful_ticket_codes), 'validated_label' => 'VALIDATED']
+                    );
+                } else {
+                    sendEntryReceipt(
+                        $detailsRow['customer_email'], $detailsRow['customer_name'],
+                        $booking_id_for_email, $detailsRow, $emailItems, $admin_who_scanned
+                    );
+                }
+            }
+
+            $msgText = $totalSuccess . " " . ($totalSuccess === 1 ? "Entry" : "Entries") . " Confirmed.";
+            header("Location: admin_verify.php?status=success&msg=" . urlencode($msgText) . "&retained_id=" . urlencode($booking_id_for_email));
+            exit;
+
+        } elseif (!empty($error_messages)) {
+            $message = implode(' | ', array_slice($error_messages, 0, 3));
+            $messageType = 'error';
+        } else {
+            $message = "Walang napiling ticket. Please select valid tickets to admit.";
+            $messageType = 'info';
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GATE ENTRY - Ajman Water Park</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; overflow-x: hidden; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #222;
+            color: #fff;
+        }
+
+        .header-bar {
+            background: #003B72;
+            padding: 14px 18px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            color: white;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            flex-wrap: wrap;
+        }
+
+        .guard-name {
+            font-weight: bold;
+            font-size: 1.1rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .guard-name > div:last-child {
+            min-width: 0;
+            word-break: break-word;
+        }
+
+        .logout-btn {
+            color: #ff6b6b;
+            text-decoration: none;
+            font-weight: bold;
+            border: 1px solid #ff6b6b;
+            padding: 8px 14px;
+            border-radius: 8px;
+            transition: 0.3s;
+            white-space: nowrap;
+        }
+
+        .logout-btn:hover {
+            background: #ff6b6b;
+            color: white;
+        }
+
+        .main-container {
+            width: min(100%, 760px);
+            margin: 18px auto;
+            background: #fff;
+            color: #333;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        #reader {
+            width: 100%;
+            background: #000;
+            min-height: 280px;
+            position: relative;
+        }
+
+        #reader video {
+            width: 100% !important;
+            height: auto !important;
+            object-fit: cover;
+        }
+
+        .scanner-status {
+            background: #0f172a;
+            color: #fff;
+            text-align: center;
+            padding: 10px 14px;
+            font-size: 0.92rem;
+            font-weight: 600;
+        }
+
+        .camera-label-bar {
+            background: #eaf2ff;
+            border-top: 1px solid rgba(0,0,0,0.06);
+            border-bottom: 1px solid rgba(0,0,0,0.06);
+            padding: 10px 14px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .camera-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #003B72;
+            color: #fff;
+            padding: 10px 14px;
+            border-radius: 999px;
+            font-size: 0.92rem;
+            font-weight: 700;
+            text-align: center;
+            flex-wrap: wrap;
+            justify-content: center;
+            box-shadow: 0 4px 12px rgba(0, 59, 114, 0.18);
+        }
+
+        .camera-pill-icon {
+            width: 28px;
+            height: 28px;
+            border-radius: 999px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255,255,255,0.16);
+            color: #fff;
+            font-size: 0.9rem;
+            flex-shrink: 0;
+        }
+
+        .camera-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 110px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 0.82rem;
+            font-weight: 800;
+            line-height: 1;
+            color: #fff;
+            letter-spacing: 0.2px;
+            box-shadow: inset 0 -2px 0 rgba(0,0,0,0.15);
+        }
+
+        .camera-badge-green { background: #16a34a; }
+        .camera-badge-orange { background: #ea580c; }
+        .camera-badge-blue { background: #2563eb; }
+        .camera-badge-gray { background: #6b7280; }
+
+        .content-box {
+            padding: 24px;
+            text-align: center;
+        }
+
+        h2 {
+            color: #003B72;
+            margin-top: 0;
+            font-size: clamp(1.35rem, 2vw, 1.8rem);
+        }
+
+        .scanner-controls {
+            display: flex;
+            gap: 10px;
+            margin: 0 0 18px 0;
+            flex-wrap: wrap;
+        }
+
+        .scanner-btn {
+            flex: 1;
+            min-width: 180px;
+            border: none;
+            border-radius: 10px;
+            padding: 14px 16px;
+            font-weight: 800;
+            cursor: pointer;
+            color: #fff;
+            font-size: 0.95rem;
+            min-height: 52px;
+            transition: transform 0.15s ease, opacity 0.15s ease, background 0.2s ease;
+        }
+
+        .scanner-btn:hover {
+            transform: translateY(-1px);
+        }
+
+        .scanner-btn:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-toggle-start { background: #16a34a; }
+        .btn-toggle-stop { background: #dc2626; }
+        .btn-switch-camera { background: #003B72; }
+        .btn-new-scan { background: #7c3aed; }
+
+        .search-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            align-items: stretch;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            min-width: 0;
+            width: 100%;
+            padding: 15px;
+            border: 3px solid #003B72;
+            border-radius: 10px;
+            font-weight: bold;
+            text-align: center;
+            font-size: clamp(1rem, 2.8vw, 1.35rem);
+        }
+
+        .btn-go {
+            background: #003B72;
+            color: white;
+            border: none;
+            padding: 0 26px;
+            border-radius: 10px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 1.05rem;
+            min-height: 56px;
+            min-width: 96px;
+        }
+
+        .status-box {
+            padding: 18px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: bold;
+            font-size: clamp(0.95rem, 2.5vw, 1.15rem);
+            word-break: break-word;
+        }
+
+        .status-valid { background: #d4edda; color: #155724; border: 2px solid #c3e6cb; }
+        .status-error { background: #f8d7da; color: #721c24; border: 2px solid #f5c6cb; }
+        .status-used { background: #fff3cd; color: #856404; border: 2px solid #ffeeba; }
+        .status-member { background: #e0f7fa; color: #006064; border: 2px solid #b2ebf2; }
+        .status-info { background: #cce5ff; color: #004085; border: 2px solid #b8daff; }
+
+        .details-card {
+            background: #f8f9fa;
+            padding: 18px;
+            border-radius: 12px;
+            border: 1px solid #eee;
+            margin-bottom: 20px;
+            text-align: left;
+            overflow: hidden;
+        }
+
+        .btn-redeem {
+            width: 100%;
+            padding: 18px 16px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: clamp(1rem, 3vw, 1.35rem);
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.2s;
+            min-height: 58px;
+        }
+
+        .btn-redeem:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .ticket-list {
+            list-style: none;
+            padding: 0;
+            margin: 15px 0;
+            max-height: 220px;
+            overflow-y: auto;
+            border: 1px solid #e3e3e3;
+            border-radius: 10px;
+            background: #fff;
+        }
+
+        .ticket-item {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px;
+            border-bottom: 1px solid #ddd;
+            font-size: 0.92rem;
+            align-items: center;
+        }
+
+        .ticket-item:last-child { border-bottom: none; }
+        .ticket-item.highlighted { background: #fff3cd; border: 2px solid #ffc107; }
+
+        .ticket-item.selectable {
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.18s ease, border 0.18s ease, box-shadow 0.18s ease, transform 0.12s ease;
+        }
+        .ticket-item.selectable:hover { background: #eef9ff; }
+        .ticket-item.selectable:active { transform: scale(0.99); }
+
+        .ticket-item.selected {
+            background: #d1fadf !important;
+            border: 2px solid #16a34a !important;
+            box-shadow: 0 4px 12px rgba(22, 163, 74, 0.18);
+        }
+
+        .ticket-item.disabled-row { opacity: 0.55; }
+
+        .select-actions {
+            display: flex;
+            gap: 8px;
+            margin: 8px 0 12px;
+            flex-wrap: wrap;
+        }
+        .select-action-btn {
+            flex: 1;
+            min-width: 130px;
+            background: #f8f9fa;
+            border: 1px solid #cbd5e1;
+            color: #003B72;
+            font-weight: 700;
+            font-size: 0.85rem;
+            padding: 10px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.18s;
+        }
+        .select-action-btn:hover {
+            background: #003B72;
+            color: white;
+            border-color: #003B72;
+        }
+
+        .badge {
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            color: white;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .badge.used { background: #dc3545; }
+        .badge.valid { background: #28a745; }
+
+        .face-modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.95);
+            z-index: 2000;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            padding: 24px 16px;
+            overflow-y: auto;
+        }
+
+        .compare-box {
+            display: flex;
+            gap: 22px;
+            margin-bottom: 20px;
+            width: 100%;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .compare-item {
+            width: min(320px, 92vw);
+            aspect-ratio: 1 / 1;
+            border: 4px solid white;
+            position: relative;
+            background: #000;
+            border-radius: 15px;
+            overflow: hidden;
+        }
+
+        .compare-item img,
+        .compare-item video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .label-overlay {
+            position: absolute;
+            top: 0;
+            width: 100%;
+            background: rgba(0,0,0,0.7);
+            text-align: center;
+            padding: 10px;
+            font-weight: bold;
+            font-size: 1rem;
+            color: #ffc107;
+        }
+
+        .match-status {
+            font-size: clamp(1.1rem, 4vw, 2rem);
+            font-weight: bold;
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px #000;
+            text-align: center;
+            padding: 0 10px;
+        }
+
+        #successOverlay {
+            display: none;
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(40, 167, 69, 0.95);
+            z-index: 3000;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .success-msg {
+            font-size: clamp(2rem, 7vw, 3rem);
+            font-weight: 800;
+            color: white;
+            margin-bottom: 20px;
+        }
+
+        .success-sub {
+            font-size: clamp(1rem, 4vw, 1.5rem);
+            color: white;
+        }
+
+        .btn-cancel {
+            padding: 14px 28px;
+            font-size: 1rem;
+            background: #444;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-top: 20px;
+            min-height: 50px;
+        }
+
+        #reader__scan_region { min-height: 240px; }
+        #reader__dashboard { padding: 10px !important; }
+        #reader__dashboard_section_swaplink { display: none !important; }
+        #reader img { max-width: 100%; }
+
+        @media (max-width: 768px) {
+            .header-bar { padding: 12px 14px; }
+            .guard-name { font-size: 1rem; }
+
+            .main-container {
+                width: calc(100% - 16px);
+                margin: 12px auto;
+                border-radius: 14px;
+            }
+
+            .content-box { padding: 18px 14px 20px; }
+            .search-group { flex-direction: column; }
+            .btn-go { width: 100%; padding: 14px 16px; }
+
+            .ticket-item {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .ticket-item .badge { align-self: flex-start; }
+
+            .scanner-controls { flex-direction: column; }
+
+            .scanner-btn {
+                width: 100%;
+                min-width: 0;
+            }
+        }
+
+        @media (max-width: 480px) {
+            #reader { min-height: 230px; }
+            .details-card { padding: 14px; }
+
+            .logout-btn {
+                width: 100%;
+                text-align: center;
+            }
+
+            .header-bar { align-items: stretch; }
+
+            .camera-label-bar { padding: 10px; }
+
+            .camera-pill {
+                width: 100%;
+                border-radius: 14px;
+                font-size: 0.9rem;
+                padding: 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header-bar">
+    <div class="guard-name">
+        <i class="fas fa-id-badge" style="font-size:1.5rem;"></i>
+        <div>
+            <div style="font-size:0.8rem; opacity:0.8;">GUARD ON DUTY</div>
+            <?php echo htmlspecialchars($_SESSION['admin_fullname']); ?>
+        </div>
+    </div>
+    <a href="admin_logout.php" class="logout-btn">LOGOUT</a>
+</div>
+
+<div class="main-container">
+    <div id="reader"></div>
+    <div id="scannerStatus" class="scanner-status">Initializing back camera...</div>
+
+    <div class="camera-label-bar">
+        <div class="camera-pill">
+            <span id="cameraTypeIcon" class="camera-pill-icon">
+                <i class="fas fa-camera-slash"></i>
+            </span>
+            <span>Selected Camera:</span>
+            <span id="cameraBadge" class="camera-badge camera-badge-gray">Detecting...</span>
+        </div>
+    </div>
+
+    <div class="content-box">
+
+        <?php if (isset($_GET['status']) && $_GET['status'] == 'success'): ?>
+            <div class="status-box status-valid">
+                <i class="fas fa-check-circle"></i> ENTRY CONFIRMED!<br>
+                <span style="font-size:0.9rem; font-weight:normal;">Receipt has been sent to email.</span>
+            </div>
+        <?php endif; ?>
+
+        <div class="scanner-controls">
+            <button type="button" id="switchCameraBtn" class="scanner-btn btn-switch-camera" onclick="switchCamera()">
+                🔄 SWITCH CAMERA
+            </button>
+            <button type="button" id="newScanBtn" class="scanner-btn btn-new-scan" onclick="resetForNewScan()">
+                <i class="fas fa-qrcode" style="margin-right:6px;"></i> NEW SCAN
+            </button>
+            <!--<button type="button" id="newScanBtn" class="scanner-btn btn-new-scan" onclick="resetForNewScan()">
+                ✨🔄 NEW SCAN
+            </button>-->
+            <button type="button" id="toggleScanBtn" class="scanner-btn btn-toggle-start" onclick="toggleScanner()">
+                ▶ START SCANNING
+            </button>
+        </div>
+
+        <h2><i class="fas fa-qrcode"></i> SCAN TICKET / ID</h2>
+
+        <?php if ($message): ?>
+            <div class="status-box <?php
+                if ($messageType == 'success') echo 'status-valid';
+                elseif ($messageType == 'used') echo 'status-used';
+                elseif ($messageType == 'info') echo 'status-info';
+                else echo 'status-error';
+            ?>">
+                <?php echo htmlspecialchars($message); ?>
+            </div>
+        <?php endif; ?>
+
+        <form method="POST" id="scanForm">
+            <div class="search-group">
+                <input type="text" id="booking_input" name="booking_id" placeholder="Enter ID here..." autocomplete="off" required>
+                <button type="submit" class="btn-go">GO</button>
+            </div>
+        </form>
+
+        <?php if ($booking): ?>
+            <div class="details-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; border-bottom:1px solid #ddd; padding-bottom:10px; margin-bottom:10px;">
+                    <h3 style="margin:0; color:#003B72;">#<?php echo str_pad($booking['booking_id'], 6, '0', STR_PAD_LEFT); ?></h3>
+                    <span style="background:<?php echo ($booking['payment_status'] == 'paid') ? 'green' : 'red'; ?>; color:white; padding:5px 10px; border-radius:4px;">
+                        <?php echo strtoupper($booking['payment_status']); ?>
+                    </span>
+                </div>
+
+<h2 style="margin:10px 0; color:#333;"><?php echo htmlspecialchars($booking['customer_name']); ?></h2>
+                <p style="margin:0; color:#666; word-break:break-word;"><?php echo htmlspecialchars($booking['customer_email']); ?></p>
+
+                <?php
+                    $stmtAllTix = $pdo->prepare("SELECT * FROM ticket_instances WHERE booking_id = ?");
+                    $stmtAllTix->execute([$booking['booking_id']]);
+                    $allTickets = $stmtAllTix->fetchAll(PDO::FETCH_ASSOC);
+
+                    // BAGONG LOGIC: Kunin ang tamang bilang ng 3 HOURS at WHOLE DAY per ticket type
+                    $stmtPass = $pdo->prepare("
+                        SELECT bi.quantity, tt.category as ticket_type, tt.product_id
+                        FROM booking_items bi
+                        JOIN ticket_types tt ON bi.product_id = CONCAT('type_', tt.type_id)
+                        WHERE bi.booking_id = ?
+                    ");
+                    $stmtPass->execute([$booking['booking_id']]);
+                    $purchasedPasses = $stmtPass->fetchAll(PDO::FETCH_ASSOC);
+
+                    // Gumawa ng listahan ng mga badges base sa dami ng binili
+                    $typeBadges = [];
+                    foreach ($purchasedPasses as $pass) {
+                        $badgeHTML = "";
+                        if ($pass['product_id'] === 'DP-FULL') {
+                            $badgeHTML = "<span style='background:#28a745; color:white; padding:3px 8px; border-radius:4px; font-size:0.75rem; margin-left:8px; vertical-align:middle; white-space:nowrap;'>⏱️ FULL DAY PASS</span>";
+                        } elseif (in_array($pass['product_id'], ['DP-RES', 'DP-NON', '3HRPSS', 'WK-DAY'])) {
+                            $badgeHTML = "<span style='background:#fd7e14; color:white; padding:3px 8px; border-radius:4px; font-size:0.75rem; margin-left:8px; vertical-align:middle; white-space:nowrap;'>⏳ 3 HOURS PASS</span>";
+                        } elseif (in_array($pass['product_id'], ['AP1', 'AP2', 'AP3'])) {
+                            $badgeHTML = "<span style='background:#6f42c1; color:white; padding:3px 8px; border-radius:4px; font-size:0.75rem; margin-left:8px; vertical-align:middle; white-space:nowrap;'>👑 ANNUAL PASS</span>";
+                        }
+
+                        // Kung bumili ng 2 "3 Hours", maglalagay ng dalawang 3 Hours badge sa array na ito
+                        for ($i = 0; $i < $pass['quantity']; $i++) {
+                            $typeBadges[$pass['ticket_type']][] = $badgeHTML;
+                        }
+                    }
+                ?>
+                
+                <?php
+                    $validTixCount = 0;
+                    foreach ($allTickets as $t) {
+                        if ($t['is_used'] == 0) $validTixCount++;
+                    }
+                    $allowSelect = (
+                        $validTixCount > 0
+                        && !$isAnnualPass
+                        && $booking['payment_status'] === 'paid'
+                        && date('Y-m-d', strtotime($booking['visit_date'])) === date('Y-m-d')
+                    );
+                ?>
+                <?php if (!empty($allTickets)): ?>
+                    <p style="margin:15px 0 5px; font-weight:bold; color:#003B72; font-size:0.9rem;">
+                        TICKETS IN THIS ORDER:
+                        <?php if ($allowSelect): ?>
+                            <span style="color:#666; font-weight:normal; font-size:0.82rem;">(tap para piliin)</span>
+                        <?php endif; ?>
+                    </p>
+
+                    <?php if ($allowSelect): ?>
+                        <div class="select-actions">
+                            <button type="button" class="select-action-btn" onclick="selectAllTickets(true)">
+                                <i class="fas fa-check-double"></i> Select All
+                            </button>
+                            <button type="button" class="select-action-btn" onclick="selectAllTickets(false)">
+                                <i class="fas fa-times"></i> Clear
+                            </button>
+                        </div>
+                    <?php endif; ?>
+
+                    <ul class="ticket-list">
+                        <?php foreach($allTickets as $t):
+                            $isHighlighted = ($scannedTicketCode == $t['ticket_code']);
+                            $isUsed        = ($t['is_used'] == 1);
+                            $canSelect     = (!$isUsed && $allowSelect);
+
+                            $myBadge = "";
+                            if (isset($typeBadges[$t['ticket_type']]) && count($typeBadges[$t['ticket_type']]) > 0) {
+                                $myBadge = array_shift($typeBadges[$t['ticket_type']]);
+                            }
+
+                            $rowClasses = 'ticket-item';
+                            if ($canSelect) {
+                                $rowClasses .= ' selectable';
+                                if ($isHighlighted) $rowClasses .= ' selected';
+                            } elseif ($isHighlighted) {
+                                $rowClasses .= ' highlighted';
+                            }
+                            if ($isUsed) $rowClasses .= ' disabled-row';
+                        ?>
+                            <li class="<?php echo $rowClasses; ?>"
+                                <?php if ($canSelect): ?>
+                                    data-ticket-code="<?php echo htmlspecialchars($t['ticket_code']); ?>"
+                                    onclick="toggleSelectTicket(this)"
+                                <?php endif; ?>>
+                                <div>
+                                    <strong style="display:inline-flex; align-items:center; flex-wrap:wrap;">
+                                        <?php echo htmlspecialchars($t['ticket_type']); ?> 
+                                        <?php echo $myBadge; ?>
+                                    </strong>
+                                    <br><small style="color:#666; font-family:monospace; word-break:break-all;"><?php echo $t['ticket_code']; ?></small>
+                                </div>
+                                <span class="badge <?php echo $isUsed ? 'used' : 'valid'; ?>">
+                                    <?php echo $isUsed ? 'USED' : 'VALID'; ?>
+                                </span>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                <?php endif; ?>
+
+                <?php if ($isAnnualPass): ?>
+                    <p style="margin-top:5px;"><strong>Expiry:</strong> <?php echo date("F d, Y", strtotime($booking['expiry_date'])); ?></p>
+                <?php endif; ?>
+            </div>
+
+            <?php
+                $today = date('Y-m-d');
+                $last_used = $booking['redeemed_at'] ? date('Y-m-d', strtotime($booking['redeemed_at'])) : '';
+                $member_entered_today = ($isAnnualPass && $last_used == $today);
+            ?>
+
+            <?php if ($booking['payment_status'] !== 'paid'): ?>
+                <div class="status-box status-error">❌ UNPAID TICKET</div>
+
+            <?php elseif ($isAnnualPass): ?>
+                <?php if ($booking['expiry_date'] < $today): ?>
+                    <div class="status-box status-error">⚠️ EXPIRED MEMBERSHIP</div>
+                <?php elseif ($member_entered_today): ?>
+                    <div class="status-box status-used">⛔ ALREADY ENTERED TODAY</div>
+                <?php else: ?>
+                    <div class="status-box status-member">✅ PLEASE LOOK AT THE CAMERA...</div>
+                    <button type="button" onclick="openFaceVerify('uploads/faces/<?php echo htmlspecialchars($booking['face_image_path']); ?>')" class="btn-redeem btn-member" style="margin-top:10px;">
+                        START FACE CHECK
+                    </button>
+                <?php endif; ?>
+
+                        <?php else: ?>
+                <?php if ($ticketStatus == 'error'): ?>
+                    <div class="status-box status-error">✗ ENTRY DENIED</div>
+                <?php elseif ($validTixCount === 0): ?>
+                    <div class="status-box status-used">⚠️ ALL TICKETS HAVE BEEN USED</div>
+                <?php elseif (date('Y-m-d', strtotime($booking['visit_date'])) !== date('Y-m-d')): ?>
+                    <div class="status-box status-error">⛔ WRONG DATE — Scheduled <?php echo date('M d, Y', strtotime($booking['visit_date'])); ?></div>
+                <?php else: ?>
+                    <form method="POST" id="batchAdmitForm">
+                        <div id="selectedTicketsContainer"></div>
+                        <button type="submit" class="btn-redeem" id="admitSelectedBtn" disabled>
+                            ✓ ADMIT SELECTED (0)
+                        </button>
+                    </form>
+                    <p style="font-size:0.85rem; color:#666; margin-top:10px; text-align:center;">
+                        <i class="fas fa-info-circle"></i> Tap mga tickets sa taas para mag-highlight (green), tapos pindutin ADMIT SELECTED.
+                    </p>
+                <?php endif; ?>
+            <?php endif; ?>
+
+
+        <?php endif; ?>
+    </div>
+</div>
+
+<div class="face-modal" id="faceModal">
+    <div id="successOverlay">
+        <div class="success-msg"><i class="fas fa-check-circle"></i> VERIFIED!</div>
+        <div class="success-sub">Welcome back, <?php echo htmlspecialchars($booking['customer_name'] ?? 'Guest'); ?></div>
+        <div class="success-sub" style="margin-top:20px; font-size:1.2rem;">Sending Receipt to Email...</div>
+    </div>
+
+    <h2 style="color:#fff;"><i class="fas fa-expand"></i> LOOK AT THE CAMERA</h2>
+
+    <div class="compare-box">
+        <div class="compare-item">
+            <div class="label-overlay">ON FILE</div>
+            <img id="storedFace" crossorigin="anonymous" alt="Stored Face">
+        </div>
+        <div class="compare-item">
+            <div class="label-overlay">LIVE CAMERA</div>
+            <video id="liveVideo" autoplay muted playsinline></video>
+        </div>
+    </div>
+
+    <div id="statusMsg" class="match-status" style="color:yellow;">Initializing System...</div>
+
+    <form method="POST" id="faceRedeemForm">
+        <input type="hidden" name="redeem_id" value="<?php echo $booking['booking_id'] ?? ''; ?>">
+    </form>
+
+    <button type="button" onclick="closeFaceVerify()" class="btn-cancel">
+        CANCEL
+    </button>
+</div>
+
+<script>
+    let html5QrCode = null;
+    let scanStarted = false;
+    let availableCameras = [];
+    let currentCameraIndex = 0;
+    let currentCameraId = null;
+    let scannerWasActiveBeforeFace = false;
+    const cameraStorageKey = 'admin_verify_selected_camera';
+
+    const backCameraKeywords = ['back', 'rear', 'environment', 'world', 'traseira', 'trasera', 'arriere', 'hintere'];
+    const frontCameraKeywords = ['front', 'user', 'face', 'facetime', 'selfie'];
+
+    function getQrConfig() {
+        const viewportWidth = Math.max(window.innerWidth || 0, 320);
+        const size = Math.max(170, Math.min(Math.floor(viewportWidth * 0.62), 280));
+        return {
+            fps: 12,
+            qrbox: { width: size, height: size },
+            aspectRatio: 4 / 3,
+            disableFlip: false,
+            formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE]
+        };
+    }
+
+    function hasCameraKeyword(camera, keywords) {
+        const label = ((camera && camera.label) || '').toLowerCase();
+        return keywords.some(keyword => label.includes(keyword));
+    }
+
+    function isBackCamera(camera) {
+        return hasCameraKeyword(camera, backCameraKeywords);
+    }
+
+    function isFrontCamera(camera) {
+        return hasCameraKeyword(camera, frontCameraKeywords);
+    }
+
+    function getPreferredCameraIndex(cameras) {
+        if (!cameras || !cameras.length) return 0;
+
+        const foundIndex = cameras.findIndex(cam => isBackCamera(cam));
+        if (foundIndex !== -1) return foundIndex;
+
+        const frontIndex = cameras.findIndex(cam => isFrontCamera(cam));
+        if (frontIndex !== -1 && cameras.length > 1) {
+            const nonFrontIndex = cameras.findIndex((cam, idx) => idx !== frontIndex);
+            if (nonFrontIndex !== -1) return nonFrontIndex;
+        }
+
+        if (cameras.length > 1) return cameras.length - 1;
+        return 0;
+    }
+
+    function formatCameraName(camera, index) {
+        if (!camera) return "No Camera";
+        if (isBackCamera(camera)) return "Rear Camera";
+        if (isFrontCamera(camera)) return "Front Camera";
+        return "Camera " + (index + 1);
+    }
+
+    function getCameraStartSequence(camera, cameraId) {
+        const sequence = [];
+
+        if (isBackCamera(camera)) {
+            sequence.push({ facingMode: { ideal: 'environment' } });
+        } else if (isFrontCamera(camera)) {
+            sequence.push({ facingMode: { ideal: 'user' } });
+        }
+
+        if (cameraId) {
+            sequence.push({ deviceId: { exact: cameraId } });
+        }
+
+        sequence.push({ facingMode: { ideal: 'environment' } });
+
+        return sequence.filter((config, index, arr) => {
+            const key = JSON.stringify(config);
+            return arr.findIndex(item => JSON.stringify(item) === key) === index;
+        });
+    }
+
+    function updateCameraLabel() {
+        const badgeEl = document.getElementById('cameraBadge');
+        const iconWrap = document.getElementById('cameraTypeIcon');
+
+        if (!badgeEl || !iconWrap) return;
+
+        badgeEl.classList.remove(
+            'camera-badge-green',
+            'camera-badge-orange',
+            'camera-badge-blue',
+            'camera-badge-gray'
+        );
+
+        let cameraName = "No Camera";
+        let iconClass = "fas fa-camera-slash";
+        let badgeClass = "camera-badge-gray";
+
+        if (availableCameras.length) {
+            const selectedCamera = availableCameras[currentCameraIndex] || availableCameras[0];
+            cameraName = formatCameraName(selectedCamera, currentCameraIndex);
+
+            if (cameraName === "Rear Camera") {
+                iconClass = "fas fa-camera-rotate";
+                badgeClass = "camera-badge-green";
+            } else if (cameraName === "Front Camera") {
+                iconClass = "fas fa-user";
+                badgeClass = "camera-badge-orange";
+            } else if (cameraName.startsWith("Camera ")) {
+                iconClass = "fas fa-video";
+                badgeClass = "camera-badge-blue";
+            }
+        }
+
+        badgeEl.textContent = cameraName;
+        badgeEl.classList.add(badgeClass);
+        iconWrap.innerHTML = '<i class="' + iconClass + '"></i>';
+    }
+
+    async function loadCameras() {
+        try {
+            availableCameras = await Html5Qrcode.getCameras() || [];
+
+            if (availableCameras.length > 0) {
+                const savedCameraId = localStorage.getItem(cameraStorageKey);
+                const savedIndex = savedCameraId
+                    ? availableCameras.findIndex(cam => cam.id === savedCameraId)
+                    : -1;
+
+                if (savedIndex !== -1) {
+                    currentCameraIndex = savedIndex;
+                } else if (currentCameraId !== null) {
+                    const liveIndex = availableCameras.findIndex(cam => cam.id === currentCameraId);
+                    currentCameraIndex = liveIndex !== -1 ? liveIndex : getPreferredCameraIndex(availableCameras);
+                } else {
+                    currentCameraIndex = getPreferredCameraIndex(availableCameras);
+                }
+
+                currentCameraId = availableCameras[currentCameraIndex].id;
+                localStorage.setItem(cameraStorageKey, currentCameraId);
+            }
+
+            updateCameraLabel();
+        } catch (err) {
+            console.error("Failed to load cameras:", err);
+            availableCameras = [];
+            updateCameraLabel();
+        }
+    }
+
+    function updateScannerButtons() {
+        const toggleBtn = document.getElementById('toggleScanBtn');
+        const switchBtn = document.getElementById('switchCameraBtn');
+
+        if (toggleBtn) {
+            if (scanStarted) {
+                toggleBtn.innerHTML = '⏹ STOP SCANNING';
+                toggleBtn.classList.remove('btn-toggle-start');
+                toggleBtn.classList.add('btn-toggle-stop');
+            } else {
+                toggleBtn.innerHTML = '▶ START SCANNING';
+                toggleBtn.classList.remove('btn-toggle-stop');
+                toggleBtn.classList.add('btn-toggle-start');
+            }
+        }
+
+        if (switchBtn) {
+            switchBtn.disabled = availableCameras.length <= 1;
+        }
+    }
+
+    function setScannerStatus(text) {
+        const el = document.getElementById('scannerStatus');
+        if (el) el.textContent = text;
+    }
+
+    async function stopScanner(customStatus = "Scanner stopped.") {
+        try {
+            if (html5QrCode) {
+                if (scanStarted) {
+                    await html5QrCode.stop();
+                }
+                try { await html5QrCode.clear(); } catch (e) {}
+            }
+        } catch (err) {
+            console.warn("Scanner stop warning:", err);
+        } finally {
+            html5QrCode = null;
+            scanStarted = false;
+            setScannerStatus(customStatus);
+            updateScannerButtons();
+        }
+    }
+
+    async function startScanner(cameraId = null) {
+        if (scanStarted) return;
+
+        try {
+            if (!availableCameras.length) {
+                await loadCameras();
+            }
+
+            if (!availableCameras.length) {
+                setScannerStatus("No camera detected.");
+                updateScannerButtons();
+                return;
+            }
+
+            if (cameraId) {
+                const foundIndex = availableCameras.findIndex(cam => cam.id === cameraId);
+                if (foundIndex !== -1) {
+                    currentCameraIndex = foundIndex;
+                    currentCameraId = availableCameras[foundIndex].id;
+                }
+            } else if (!currentCameraId) {
+                currentCameraIndex = getPreferredCameraIndex(availableCameras);
+                currentCameraId = availableCameras[currentCameraIndex].id;
+            }
+
+            const selectedCamera = availableCameras[currentCameraIndex] || availableCameras[0];
+
+            if (!selectedCamera) {
+                setScannerStatus("No available camera found.");
+                updateScannerButtons();
+                return;
+            }
+
+            currentCameraId = selectedCamera.id;
+            localStorage.setItem(cameraStorageKey, currentCameraId);
+            updateCameraLabel();
+
+            const startSequence = getCameraStartSequence(selectedCamera, currentCameraId);
+            let lastError = null;
+
+            for (const cameraConfig of startSequence) {
+                try {
+                    if (!html5QrCode) {
+                        html5QrCode = new Html5Qrcode("reader");
+                    }
+
+                    await html5QrCode.start(
+                        cameraConfig,
+                        getQrConfig(),
+                        onScanSuccess,
+                        () => {}
+                    );
+
+                    scanStarted = true;
+                    setScannerStatus("Camera active: " + (selectedCamera.label || ("Camera " + (currentCameraIndex + 1))));
+                    updateScannerButtons();
+                    return;
+                } catch (err) {
+                    lastError = err;
+                    console.warn("Camera start attempt failed:", cameraConfig, err);
+
+                    try {
+                        if (html5QrCode && scanStarted) {
+                            await html5QrCode.stop();
+                        }
+                    } catch (stopErr) {
+                        console.warn("Scanner stop attempt warning:", stopErr);
+                    }
+
+                    try {
+                        if (html5QrCode) {
+                            await html5QrCode.clear();
+                        }
+                    } catch (clearErr) {}
+
+                    html5QrCode = null;
+                    scanStarted = false;
+                }
+            }
+
+            throw lastError || new Error('Unable to start camera');
+
+        } catch (primaryError) {
+            console.error("Scanner start failed:", primaryError);
+            html5QrCode = null;
+            scanStarted = false;
+            setScannerStatus("Unable to start camera. Please allow camera access.");
+            updateScannerButtons();
+        }
+    }
+
+    async function toggleScanner() {
+        if (scanStarted) {
+            await stopScanner("Scanner stopped manually.");
+        } else {
+            await startScanner(currentCameraId);
+        }
+    }
+
+    async function switchCamera() {
+        if (!availableCameras.length) {
+            await loadCameras();
+        }
+
+        if (availableCameras.length <= 1) {
+            setScannerStatus("No other camera available.");
+            updateScannerButtons();
+            return;
+        }
+
+        currentCameraIndex = (currentCameraIndex + 1) % availableCameras.length;
+        currentCameraId = availableCameras[currentCameraIndex].id;
+        localStorage.setItem(cameraStorageKey, currentCameraId);
+        updateCameraLabel();
+
+        const nextLabel = availableCameras[currentCameraIndex].label || ("Camera " + (currentCameraIndex + 1));
+
+        if (scanStarted) {
+            await stopScanner("Switching camera...");
+            await startScanner(currentCameraId);
+        } else {
+            setScannerStatus("Selected camera: " + nextLabel + " (scanner off)");
+            updateScannerButtons();
+        }
+    }
+
+    async function resetForNewScan() {
+        const inputEl = document.getElementById('booking_input');
+        if (inputEl) inputEl.value = '';
+
+        await stopScanner("Preparing new scan...");
+        window.location.href = 'admin_verify.php';
+    }
+
+    async function onScanSuccess(text) {
+        document.getElementById('booking_input').value = text;
+        await stopScanner("QR detected. Processing...");
+        document.getElementById('scanForm').submit();
+    }
+
+    // FACE API
+    let isModelsLoaded = false;
+    let matchInterval;
+    const autoStart = <?php echo json_encode($autoStartFace); ?>;
+    const facePath = <?php echo json_encode(isset($booking['face_image_path']) ? 'uploads/faces/' . $booking['face_image_path'] : ''); ?>;
+
+    async function loadModels() {
+        try {
+            await faceapi.nets.ssdMobilenetv1.loadFromUri('models');
+            await faceapi.nets.faceLandmark68Net.loadFromUri('models');
+            await faceapi.nets.faceRecognitionNet.loadFromUri('models');
+            isModelsLoaded = true;
+
+            if (autoStart && facePath !== "") {
+                setTimeout(() => { openFaceVerify(facePath); }, 1000);
+            }
+        } catch (err) {
+            console.error("Face model loading failed:", err);
+        }
+    }
+
+    async function openFaceVerify(imagePath) {
+        document.getElementById('faceModal').style.display = 'flex';
+        document.getElementById('storedFace').src = imagePath;
+
+        scannerWasActiveBeforeFace = scanStarted;
+
+        if (scanStarted) {
+            await stopScanner("Scanner paused for face verification.");
+        }
+
+        const video = document.getElementById('liveVideo');
+        const statusMsg = document.getElementById('statusMsg');
+        statusMsg.innerText = "Starting back camera...";
+
+        try {
+            let stream;
+
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: { ideal: "environment" },
+                        width: { ideal: 320 },
+                        height: { ideal: 320 }
+                    },
+                    audio: false
+                });
+            } catch (err) {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 320 },
+                        height: { ideal: 320 }
+                    },
+                    audio: false
+                });
+            }
+
+            video.srcObject = stream;
+            statusMsg.innerText = "Scanning Face...";
+
+            if (isModelsLoaded) {
+                startMatching(imagePath, video);
+            }
+        } catch (err) {
+            alert("Camera Error: " + err);
+        }
+    }
+
+    async function startMatching(imagePath, video) {
+        const img = document.getElementById('storedFace');
+        const storedDetection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
+
+        if (!storedDetection) {
+            document.getElementById('statusMsg').innerText = "Stored face not detected.";
+            document.getElementById('statusMsg').style.color = "#ff6b6b";
+            return;
+        }
+
+        const faceMatcher = new faceapi.FaceMatcher(storedDetection);
+
+        if (matchInterval) clearInterval(matchInterval);
+
+        matchInterval = setInterval(async () => {
+            const liveDetection = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+
+            if (liveDetection) {
+                const bestMatch = faceMatcher.findBestMatch(liveDetection.descriptor);
+                const matchScore = Math.round((1 - bestMatch.distance) * 100);
+
+                if (bestMatch.distance < 0.45) {
+                    clearInterval(matchInterval);
+                    document.getElementById('statusMsg').innerText = "MATCH: " + matchScore + "%";
+                    document.getElementById('statusMsg').style.color = "#28a745";
+                    document.getElementById('successOverlay').style.display = 'flex';
+                    setTimeout(() => {
+                        document.getElementById('faceRedeemForm').submit();
+                    }, 2000);
+                } else {
+                    document.getElementById('statusMsg').innerText = "Scanning... (" + matchScore + "%)";
+                    document.getElementById('statusMsg').style.color = "yellow";
+                }
+            }
+        }, 500);
+    }
+
+    async function closeFaceVerify() {
+        document.getElementById('faceModal').style.display = 'none';
+        document.getElementById('successOverlay').style.display = 'none';
+
+        if (matchInterval) clearInterval(matchInterval);
+
+        const video = document.getElementById('liveVideo');
+        if (video.srcObject) {
+            video.srcObject.getTracks().forEach(track => track.stop());
+            video.srcObject = null;
+        }
+
+
+        if (scannerWasActiveBeforeFace) {
+            setTimeout(() => {
+                startScanner(currentCameraId);
+            }, 250);
+        } else {
+            setScannerStatus("Scanner remains off.");
+            updateScannerButtons();
+        }
+    }
+
+    window.addEventListener('load', async function () {
+        await loadCameras();
+        updateScannerButtons();
+        await startScanner(currentCameraId);
+        loadModels();
+        syncSelectedToForm();
+    });
+
+    window.addEventListener('beforeunload', function () {
+        stopScanner("Leaving page...");
+    });
+
+    // =========================================================
+    // MULTI-SELECT (click-to-highlight)
+    // =========================================================
+    function toggleSelectTicket(rowEl) {
+        if (!rowEl) return;
+        rowEl.classList.toggle('selected');
+        syncSelectedToForm();
+    }
+
+    function selectAllTickets(checked) {
+        document.querySelectorAll('.ticket-item.selectable').forEach(row => {
+            if (checked) row.classList.add('selected');
+            else row.classList.remove('selected');
+        });
+        syncSelectedToForm();
+    }
+
+    function syncSelectedToForm() {
+        const container = document.getElementById('selectedTicketsContainer');
+        const btn = document.getElementById('admitSelectedBtn');
+        if (!container || !btn) return;
+
+        const selectedRows = document.querySelectorAll('.ticket-item.selected');
+        container.innerHTML = '';
+
+        selectedRows.forEach(row => {
+            const code = row.dataset.ticketCode;
+            if (code) {
+                const input = document.createElement('input');
+                input.type  = 'hidden';
+                input.name  = 'redeem_ids[]';
+                input.value = code;
+                container.appendChild(input);
+            }
+        });
+
+        const count = selectedRows.length;
+        btn.textContent = count === 0
+            ? '✓ ADMIT SELECTED (0)'
+            : '✓ ADMIT SELECTED (' + count + ')';
+        btn.disabled = count === 0;
+    }
+</script>
+
+</body>
+</html>

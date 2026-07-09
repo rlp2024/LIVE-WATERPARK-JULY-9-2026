@@ -1,0 +1,1 @@
+[2026-07-09 11:56:17] PUSH booking 1007 - 3 line(s) (tickets=3, addons=0), total=157.5, vat=7.5, disc=0: {"ok":true,"http":200,"result_code":"1","raw":"{\"Status\":{\"ResultCode\":\"1\",\"Error\":\"\",\"ResultStatus\":\"Success\"},\"BillSerialNo\":\"35\",\"TotalEarnedPoints\":\"0\"}"}

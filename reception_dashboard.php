@@ -1,0 +1,2519 @@
+<?php
+session_start();
+include_once 'db_connect.php';
+include_once 'admin_audit.php';
+
+// =========================================================
+// FIXED: TIMEZONE-SAFE AUTO-VOID AFTER 30 MINS
+// =========================================================
+try {
+    date_default_timezone_set('Asia/Dubai');
+    $voidThreshold = date('Y-m-d H:i:s', strtotime('-30 minutes'));
+    
+    $stmtVoid = $pdo->prepare("
+        UPDATE bookings 
+        SET payment_status = 'failed' 
+        WHERE (payment_method IN ('pay_at_counter', 'cash') OR payment_method IS NULL)
+        AND payment_status = 'pending' 
+        AND created_at <= ?
+    ");
+    $stmtVoid->execute([$voidThreshold]);
+} catch (Exception $e) {
+    // Ignore error, tuloy lang ang page loading
+}
+// =========================================================
+// 1. GLOBAL SETTINGS & INITIALIZATION
+// =========================================================
+
+// Fix Timezone
+date_default_timezone_set('Asia/Dubai');
+function normalize_date($value, $default) {
+    if (!is_string($value) || $value === '') return $default;
+    $d = DateTime::createFromFormat('Y-m-d', $value);
+    return ($d && $d->format('Y-m-d') === $value) ? $value : $default;
+} 
+
+// IMPORTANT: DEFINE ACTIVE TAB FOR RECEPTION
+$allowed_tabs = ['sales', 'sales_report', 'reschedule', 'walkin_pos', 'pending_walkins', 'qrwallets', 'scanners'];
+$active_tab = $_GET['view'] ?? 'walkin_pos'; 
+
+if (!in_array($active_tab, $allowed_tabs, true)) {
+    $active_tab = 'walkin_pos';
+}
+
+// =========================================================
+// 2. SECURITY & ROLE CHECK 
+// =========================================================
+if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
+    header("Location: admin_login.php");
+    exit;
+}
+
+// AUTO-LOGOUT IF PASSWORD CHANGED IN DATABASE
+if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_password_hash'])) {
+    $stmtPassCheck = $pdo->prepare("SELECT password FROM admins WHERE admin_id = ?");
+    $stmtPassCheck->execute([$_SESSION['admin_id']]);
+    $currentDbPass = $stmtPassCheck->fetchColumn();
+
+    if ($currentDbPass !== $_SESSION['admin_password_hash']) {
+        session_destroy();
+        header("Location: admin_login.php?msg=" . urlencode("Session expired. Password was changed."));
+        exit;
+    }
+}
+
+$role = $_SESSION['admin_role'];
+
+// Restrict access (I-redirect pabalik sa admin_dashboard kung boss o manager ang pumasok dito)
+if ($role === 'boss' || $role === 'salesmanager') {
+    header("Location: admin_dashboard.php");
+    exit;
+}
+
+// =========================================================
+// PART 0: AJAX FETCH QR WALLET HISTORY
+// =========================================================
+// =========================================================
+// NEW AJAX ACTION: SECURE DETAILED PAYMENT SPLIT METHOD
+// =========================================================
+if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'update_payment_split') {
+    header('Content-Type: application/json');
+    $booking_id = (int)$_GET['booking_id'];
+    $cash = (float)$_GET['cash'];
+    $card = (float)$_GET['card'];
+    
+    $final_method = 'Cash';
+    if ($cash > 0 && $card > 0) {
+        $final_method = "Cash: " . number_format($cash, 2) . " | Card: " . number_format($card, 2);
+    } elseif ($card > 0 && $cash == 0) {
+        $final_method = "Card";
+    }
+
+    try {
+        $stmt = $pdo->prepare("UPDATE bookings SET payment_method = ? WHERE booking_id = ?");
+        $stmt->execute([$final_method, $booking_id]);
+        echo json_encode(['status' => 'success']);
+    } catch (Exception $e) {
+        echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'get_qr_history') {
+    $wallet_id = (int)$_GET['wallet_id'];
+    
+    $stmt = $pdo->prepare("SELECT * FROM qr_transactions WHERE wallet_id = ? ORDER BY created_at DESC");
+    $stmt->execute([$wallet_id]);
+    $transactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    if (!$transactions) {
+        echo "<p style='padding: 20px; text-align: center; color: #666;'>No transaction history found for this card.</p>";
+        exit;
+    }
+
+    echo "<table style='width:100%; border-collapse:collapse; font-size:0.9rem;'>";
+    echo "<thead><tr style='background:#f8f9fa; border-bottom:2px solid #eee;'><th style='padding:10px; text-align:left;'>Date</th><th style='padding:10px; text-align:left;'>Type</th><th style='padding:10px; text-align:left;'>Amount</th><th style='padding:10px; text-align:left;'>Description</th><th style='padding:10px; text-align:left;'>Details</th></tr></thead><tbody>";
+    
+    foreach ($transactions as $t) {
+        $date = date('M d, Y h:i A', strtotime($t['created_at']));
+        $points = number_format($t['points'], 2);
+        $desc = htmlspecialchars($t['description']);
+        
+        $typeBadge = in_array($t['transaction_type'], ['reload', 'topup']) ? "<span class='badge bg-active'>Reloaded</span>" : "<span class='badge' style='background:#f8d7da; color:#721c24;'>Purchased</span>";
+        $pointsDisplay = in_array($t['transaction_type'], ['reload', 'topup']) ? "<span style='color:green;'>+$points AED</span>" : "<span style='color:red;'>-$points AED</span>";
+
+        $detailsHtml = "-";
+        
+        if ($t['transaction_type'] == 'purchase' && !empty($t['reference_id'])) {
+            $booking_id = $t['reference_id'];
+            $stmtItems = $pdo->prepare("
+                SELECT bi.quantity, COALESCE(tt.category, p.name) as item_name 
+                FROM booking_items bi
+                LEFT JOIN products p ON bi.product_id = p.product_id
+                LEFT JOIN ticket_types tt ON bi.product_id = CONCAT('type_', tt.type_id)
+                WHERE bi.booking_id = ?
+            ");
+            $stmtItems->execute([$booking_id]);
+            $items = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+            
+            if ($items) {
+                $detailsHtml = "<ul style='margin:0; padding-left:15px; font-size:0.85rem; color:#444;'>";
+                foreach($items as $item) {
+                    $detailsHtml .= "<li>" . $item['quantity'] . "x " . htmlspecialchars($item['item_name']) . "</li>";
+                }
+                $detailsHtml .= "</ul><small style='color:#888;'>Ref/Booking: #$booking_id</small>";
+            } else {
+                $detailsHtml = "<small style='color:#888;'>Ref/Booking: #$booking_id</small>";
+            }
+        }
+
+        echo "<tr style='border-bottom:1px solid #eee;'>";
+        echo "<td style='padding:10px;'>$date</td>";
+        echo "<td style='padding:10px;'>$typeBadge</td>";
+        echo "<td style='padding:10px;'><strong>$pointsDisplay</strong></td>";
+        echo "<td style='padding:10px;'>$desc</td>";
+        echo "<td style='padding:10px;'>$detailsHtml</td>";
+        echo "</tr>";
+    }
+    echo "</tbody></table>";
+    exit;
+}
+// =========================================================
+// HANDLE CANCEL/DECLINE BOOKING
+// =========================================================
+if (isset($_GET['action']) && $_GET['action'] == 'decline' && isset($_GET['booking_id'])) {
+    $decline_id = (int)$_GET['booking_id'];
+    if ($decline_id <= 0) {
+        header("Location: reception_dashboard.php?view=pending_walkins&error=" . urlencode("Invalid Booking ID"));
+        exit;
+    }
+    try {
+        // I-update lang kung pending pa, para safe
+        $stmtDecline = $pdo->prepare("
+            UPDATE bookings 
+            SET payment_status = 'failed' 
+            WHERE booking_id = ? AND payment_status = 'pending'
+        ");
+        $stmtDecline->execute([$decline_id]);
+        $rowsAffected = $stmtDecline->rowCount();
+
+        if ($rowsAffected > 0) {
+            header("Location: reception_dashboard.php?view=pending_walkins&msg=" . urlencode("Booking #" . str_pad($decline_id, 6, '0', STR_PAD_LEFT) . " has been declined and voided."));
+        } else {
+            header("Location: reception_dashboard.php?view=pending_walkins&error=" . urlencode("Booking not found or already processed."));
+        }
+        exit;
+    } catch (Exception $e) {
+        error_log("Decline booking error (ID: $decline_id): " . $e->getMessage());
+        header("Location: reception_dashboard.php?view=pending_walkins&error=" . urlencode("System Error: " . $e->getMessage()));
+        exit;
+    }
+}
+// =========================================================
+// PART 1: HANDLE RESEND EMAIL ACTION (INTEGRATED)
+// =========================================================
+if (isset($_GET['action']) && $_GET['action'] == 'resend' && isset($_GET['booking_id'])) {
+    $resend_id = (int)$_GET['booking_id'];
+    if (file_exists('email_helper.php')) {
+        require_once 'email_helper.php';
+        try {
+            $stmt = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+            $stmt->execute([$resend_id]);
+            $booking = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($booking) {
+                $stmtItems = $pdo->prepare("SELECT product_id, quantity, price_per_item as price FROM booking_items WHERE booking_id = ?");
+                $stmtItems->execute([$resend_id]);
+                $rawItems = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+                
+                $items = [];
+                foreach($rawItems as $row) {
+                    $name = "Unknown Item";
+                    $pid = $row['product_id'];
+                    if (strpos($pid, 'type_') === 0) {
+                        $typeId = str_replace('type_', '', $pid);
+                        $stmtT = $pdo->prepare("SELECT category, sub_label FROM ticket_types WHERE type_id = ?");
+                        $stmtT->execute([$typeId]);
+                        $t = $stmtT->fetch();
+                        if($t) $name = $t['category'] . ' (' . $t['sub_label'] . ')';
+                    } else {
+                        $stmtP = $pdo->prepare("SELECT name FROM products WHERE product_id = ?");
+                        $stmtP->execute([$pid]);
+                        $p = $stmtP->fetch();
+                        if($p) $name = $p['name'];
+                    }
+                    $items[] = ['product_id' => $pid, 'name' => $name, 'quantity' => $row['quantity'], 'price' => $row['price']];
+                }
+
+                $sent = sendBookingConfirmation($booking['customer_email'], $booking['customer_name'], $booking['booking_id'], $booking, $items);
+                $msg = $sent ? "&msg=Email resent successfully" : "&error=Failed to send email.";
+                header("Location: reception_dashboard.php?view=sales" . $msg);
+                exit;
+            }
+        } catch (Exception $e) {
+            header("Location: reception_dashboard.php?view=sales&error=System Error");
+            exit;
+        }
+    }
+}
+
+// =========================================================
+// PART 2: HANDLE RESEND TRANSACTION RECEIPT (FROM MODAL)
+// =========================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['resend_txn_receipt'])) {
+    $resend_id = (int)$_POST['resend_booking_id'];
+    $target_email = trim($_POST['target_email']);
+    $admin_name = $_SESSION['admin_fullname'] ?? $_SESSION['admin_username'] ?? 'Reception';
+
+    if (file_exists('email_helper.php')) {
+        require_once 'email_helper.php';
+        try {
+            $stmt = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+            $stmt->execute([$resend_id]);
+            $booking = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($booking) {
+                $stmtItems = $pdo->prepare("SELECT product_id, quantity, price_per_item as price FROM booking_items WHERE booking_id = ?");
+                $stmtItems->execute([$resend_id]);
+                $rawItems = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+                
+                $items = [];
+                foreach($rawItems as $row) {
+                    $name = "Unknown Item";
+                    $pid = $row['product_id'];
+                    if (strpos($pid, 'type_') === 0) {
+                        $typeId = str_replace('type_', '', $pid);
+                        $stmtT = $pdo->prepare("SELECT category, sub_label FROM ticket_types WHERE type_id = ?");
+                        $stmtT->execute([$typeId]);
+                        $t = $stmtT->fetch();
+                        if($t) $name = $t['category'] . ' (' . $t['sub_label'] . ')';
+                    } else {
+                        $stmtP = $pdo->prepare("SELECT name FROM products WHERE product_id = ?");
+                        $stmtP->execute([$pid]);
+                        $p = $stmtP->fetch();
+                        if($p) $name = $p['name'];
+                    }
+                    $items[] = ['product_id' => $pid, 'name' => $name, 'quantity' => $row['quantity'], 'price' => $row['price']];
+                }
+
+                $sent = sendEntryReceipt($target_email, $booking['customer_name'], $booking['booking_id'], $booking, $items, $admin_name);
+                $params = $_GET;
+                $params['msg_resend'] = $sent ? 'success' : 'error';
+                header("Location: reception_dashboard.php?" . http_build_query($params));
+                exit;
+            }
+        } catch (Exception $e) {
+             $params = $_GET;
+             $params['msg_resend'] = 'error';
+             header("Location: reception_dashboard.php?" . http_build_query($params));
+             exit;
+        }
+    }
+}
+
+// =========================================================
+// PART 3: HANDLE MANUAL MARK AS CLAIMED (FORCE OVERRIDE)
+// =========================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['manual_mark_claimed'])) {
+    $claim_booking_id = (int)$_POST['claim_booking_id'];
+    $override_reason = trim($_POST['override_reason'] ?? 'No reason provided');
+    $admin_name = $_SESSION['admin_fullname'] ?? $_SESSION['admin_username'] ?? 'Reception';
+    
+    $marked_by_string = $admin_name . ' (Manual: ' . $override_reason . ')';
+
+    try {
+        $stmtClaim = $pdo->prepare("UPDATE bookings SET is_redeemed = 1, redeemed_by = ?, redeemed_at = NOW() WHERE booking_id = ? AND is_redeemed = 0");
+        $stmtClaim->execute([$marked_by_string, $claim_booking_id]);
+
+        $stmtTix = $pdo->prepare("UPDATE ticket_instances SET is_used = 1, used_at = NOW(), scanned_by = ? WHERE booking_id = ? AND is_used = 0");
+        $stmtTix->execute([$marked_by_string, $claim_booking_id]);
+
+        $params = $_GET;
+        $params['msg_claim'] = 'success';
+        header("Location: reception_dashboard.php?" . http_build_query($params));
+        exit;
+    } catch (Exception $e) {
+        $params = $_GET;
+        $params['msg_claim'] = 'error';
+        header("Location: reception_dashboard.php?" . http_build_query($params));
+        exit;
+    }
+}
+
+// =========================================================
+// PART 4: ADD-ON HISTORY (BACKTRACK) MODAL
+// =========================================================
+$addonLogsEnabled = false;
+$show_addon_history_modal = false;
+$addon_history_logs = [];
+$addon_history_booking = null;
+
+try {
+    $pdo->query("SELECT 1 FROM addon_purchase_logs LIMIT 1");
+    $addonLogsEnabled = true;
+} catch (Exception $e) {
+    $addonLogsEnabled = false;
+}
+
+if (isset($_GET['addon_history_id'])) {
+    $hid = (int)$_GET['addon_history_id'];
+    $show_addon_history_modal = true;
+
+    try {
+        $stmtB = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ? LIMIT 1");
+        $stmtB->execute([$hid]);
+        $addon_history_booking = $stmtB->fetch(PDO::FETCH_ASSOC);
+
+        if ($addonLogsEnabled) {
+            $stmtL = $pdo->prepare("SELECT * FROM addon_purchase_logs WHERE booking_id = ? ORDER BY created_at DESC");
+            $stmtL->execute([$hid]);
+            $addon_history_logs = $stmtL->fetchAll(PDO::FETCH_ASSOC);
+        }
+    } catch (Exception $e) {
+        $addon_history_logs = [];
+    }
+}
+
+// =========================================================
+// PART 5: TRANSACTION DETAILS POPUP
+// =========================================================
+$show_txn_details_modal = false;
+$txn_booking = null;
+$txn_items = [];
+$txn_ticket_instances = [];
+$txn_addon_redeems = [];
+$txn_addon_topups = [];
+
+$txn_close_url = 'reception_dashboard.php?view=' . urlencode($active_tab);
+
+try {
+    $txn_close_params = $_GET;
+    unset($txn_close_params['booking_details_id']);
+    $txn_close_url = 'reception_dashboard.php' . (count($txn_close_params) ? '?' . http_build_query($txn_close_params) : '');
+} catch (Exception $e) {}
+
+if (isset($_GET['booking_details_id']) && is_numeric($_GET['booking_details_id'])) {
+    $bid = (int)$_GET['booking_details_id'];
+    $show_txn_details_modal = true;
+
+    try {
+        $stmtB = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ? LIMIT 1");
+        $stmtB->execute([$bid]);
+        $txn_booking = $stmtB->fetch(PDO::FETCH_ASSOC);
+
+        $stmtI = $pdo->prepare("SELECT product_id, quantity, price_per_item AS price FROM booking_items WHERE booking_id = ?");
+        $stmtI->execute([$bid]);
+        $rawItems = $stmtI->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($rawItems as $row) {
+            $pid = $row['product_id'];
+            $name = $pid;
+
+            if (strpos($pid, 'type_') === 0) {
+                $typeId = str_replace('type_', '', $pid);
+                try {
+                    $st = $pdo->prepare("SELECT tt.category, tt.sub_label, p.name as package_name FROM ticket_types tt LEFT JOIN products p ON tt.product_id = p.product_id WHERE tt.type_id = ? LIMIT 1");
+                    $st->execute([$typeId]);
+                    $tt = $st->fetch(PDO::FETCH_ASSOC);
+                    if ($tt) {
+                        $pkg = !empty($tt['package_name']) ? $tt['package_name'] . ' - ' : '';
+                        $sub = !empty($tt['sub_label']) ? ' (' . $tt['sub_label'] . ')' : '';
+                        $name = $pkg . $tt['category'] . $sub;
+                    }
+                } catch (Exception $e) { }
+            } else {
+                try {
+                    $sp = $pdo->prepare("SELECT name FROM products WHERE product_id = ? LIMIT 1");
+                    $sp->execute([$pid]);
+                    $pp = $sp->fetch(PDO::FETCH_ASSOC);
+                    if ($pp && !empty($pp['name'])) $name = $pp['name'];
+                } catch (Exception $e) { }
+            }
+
+            $qty = (int)($row['quantity'] ?? 0);
+            $price = (float)($row['price'] ?? 0);
+
+            $txn_items[] = ['product_id' => $pid, 'name' => $name, 'quantity' => $qty, 'price' => $price, 'subtotal' => $qty * $price];
+        }
+
+        try {
+            $stmtT = $pdo->prepare("SELECT * FROM ticket_instances WHERE booking_id = ? ORDER BY is_used DESC, used_at DESC LIMIT 500");
+            $stmtT->execute([$bid]);
+            $txn_ticket_instances = $stmtT->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {}
+
+        if (!empty($addonLogsEnabled)) {
+            try {
+                $stmtAT = $pdo->prepare("SELECT * FROM addon_purchase_logs WHERE booking_id = ? ORDER BY created_at DESC LIMIT 800");
+                $stmtAT->execute([$bid]);
+                $txn_addon_topups = $stmtAT->fetchAll(PDO::FETCH_ASSOC);
+            } catch (Exception $e) {}
+        }
+
+    } catch (Exception $e) {
+        $txn_booking = null;
+    }
+}
+
+// =========================================================
+// PART 6: HANDLE RESCHEDULE ACTION & DATA FETCHING
+// =========================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reschedule_booking'])) {
+    $r_booking_id = (int)$_POST['r_booking_id'];
+    $new_date = $_POST['new_visit_date'];
+    $admin_name = $_SESSION['admin_fullname'] ?? 'Reception';
+
+    try {
+        $checkUsed = $pdo->prepare("SELECT COUNT(*) FROM ticket_instances WHERE booking_id = ? AND is_used = 1");
+        $checkUsed->execute([$r_booking_id]);
+        $usedCount = (int)$checkUsed->fetchColumn();
+
+        if ($usedCount > 0) {
+            header("Location: reception_dashboard.php?view=reschedule&error=" . urlencode("Cannot reschedule. $usedCount ticket(s) have already been scanned/used."));
+            exit;
+        }
+
+        $stmtU = $pdo->prepare("UPDATE bookings SET visit_date = ? WHERE booking_id = ?");
+        $stmtU->execute([$new_date, $r_booking_id]);
+
+        if (file_exists('email_helper.php')) {
+            require_once 'email_helper.php';
+            
+            $stmtB = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+            $stmtB->execute([$r_booking_id]);
+            $bData = $stmtB->fetch(PDO::FETCH_ASSOC);
+
+            $stmtI = $pdo->prepare("SELECT product_id, quantity, price_per_item as price FROM booking_items WHERE booking_id = ?");
+            $stmtI->execute([$r_booking_id]);
+            $iData = $stmtI->fetchAll(PDO::FETCH_ASSOC);
+
+            $items = [];
+            foreach($iData as $row) {
+                $items[] = ['product_id' => $row['product_id'], 'name' => $row['product_id'], 'quantity' => $row['quantity'], 'price' => $row['price']];
+            }
+
+            if (function_exists('sendRescheduleEmail')) {
+                sendRescheduleEmail($bData['customer_email'], $bData['customer_name'], $bData['booking_id'], $bData, $items, $new_date, $admin_name);
+            }
+        }
+        
+        header("Location: reception_dashboard.php?view=reschedule&msg=" . urlencode("Booking #$r_booking_id successfully rescheduled to $new_date and email sent!"));
+        exit;
+
+    } catch (Exception $e) {
+        header("Location: reception_dashboard.php?view=reschedule&error=" . urlencode("System Error: " . $e->getMessage()));
+        exit;
+    }
+}
+
+$reschedule_data = [];
+if ($active_tab == 'reschedule') {
+    $r_search = trim($_GET['r_search'] ?? '');
+    $r_from = normalize_date($_GET['r_from'] ?? null, '');
+    $r_to   = normalize_date($_GET['r_to'] ?? null, '');
+
+    $sqlR = "SELECT b.*, 
+             (SELECT COUNT(*) FROM ticket_instances t WHERE t.booking_id = b.booking_id AND t.is_used = 1) as used_tickets_count
+             FROM bookings b 
+             WHERE b.payment_status = 'paid'";
+    
+    $paramsR = [];
+
+    if ($r_search !== '') {
+        $sqlR .= " AND (b.customer_name LIKE ? OR b.customer_email LIKE ? OR b.booking_id = ?)";
+        $paramsR[] = "%$r_search%";
+        $paramsR[] = "%$r_search%";
+        $paramsR[] = $r_search;
+    }
+    
+    if ($r_from !== '' && $r_to !== '') {
+        $sqlR .= " AND b.visit_date BETWEEN ? AND ?";
+        $paramsR[] = $r_from;
+        $paramsR[] = $r_to;
+    }
+
+    $sqlR .= " ORDER BY b.visit_date ASC LIMIT 500";
+
+    $stmtR = $pdo->prepare($sqlR);
+    $stmtR->execute($paramsR);
+    $reschedule_data = $stmtR->fetchAll(PDO::FETCH_ASSOC);
+}
+
+// =========================================================
+// PART 7: SALES DASHBOARD LOGIC (TRANSACTION HISTORY)
+// =========================================================
+$defaultStart = date('Y-m-01');
+$defaultEnd   = date('Y-m-d');
+$start_date = normalize_date($_GET['start_date'] ?? null, $defaultStart);
+$end_date   = normalize_date($_GET['end_date']   ?? null, $defaultEnd);
+$filter_cashier = $_GET['cashier'] ?? 'all'; // BAGONG FILTER VARIABLE
+
+if ($end_date < $start_date) {
+    [$start_date, $end_date] = [$end_date, $start_date];
+}
+$sql_end_date = $end_date . ' 23:59:59';
+$sql_start_date = $start_date . ' 00:00:00';
+
+// FETCH RECEPTIONISTS ONLY (role = 'user' or 'staff') PARA SA DROPDOWN
+$adminList = [];
+try {
+    // Dinagdag natin ang WHERE role IN ('user', 'staff') para hindi masama si boss at salesmanager
+    $stmtAdmins = $pdo->query("SELECT username, full_name FROM admins WHERE role IN ('user') ORDER BY full_name ASC");
+    $adminList = $stmtAdmins->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {}
+
+// DYNAMIC SQL QUERY BASE SA FILTER
+$sqlSales = "
+    SELECT b.*,
+           (SELECT COUNT(*) FROM ticket_instances t WHERE t.booking_id = b.booking_id AND t.is_used = 1) as used_tix_count,
+           (SELECT COUNT(*) FROM pass_visits pv WHERE pv.booking_id = b.booking_id) as pass_visit_count
+    FROM bookings b 
+    WHERE b.payment_status = 'paid' 
+    AND b.created_at BETWEEN ? AND ? 
+";
+$salesParams = [$sql_start_date, $sql_end_date];
+
+// IDAGDAG SA QUERY KUNG MAY PINILING SPECIFIC NA CASHIER
+if ($filter_cashier !== 'all') {
+    $sqlSales .= " AND b.cashier_name = ? ";
+    $salesParams[] = $filter_cashier;
+}
+
+$sqlSales .= " ORDER BY b.created_at DESC LIMIT 200";
+
+$stmt = $pdo->prepare($sqlSales);
+$stmt->execute($salesParams);
+$rawTransactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$transactions = [];
+
+if (!empty($rawTransactions)) {
+    $booking_ids = array_column($rawTransactions, 'booking_id');
+    $inQuery = implode(',', array_fill(0, count($booking_ids), '?'));
+
+    $sqlItems = "
+        SELECT 
+            bi.booking_id, 
+            bi.quantity, 
+            CASE 
+                WHEN bi.product_id LIKE 'QRN_%' THEN 'New QR Wallet Card'
+                WHEN bi.product_id LIKE 'QRR_%' THEN 'QR Wallet Top-up'
+                ELSE COALESCE(
+                    CONCAT(p_pkg.name, ' - ', tt.category), 
+                    tt.category, 
+                    p.name, 
+                    bi.product_id
+                ) 
+            END AS item_name,
+            p.category_id
+        FROM booking_items bi
+        LEFT JOIN ticket_types tt ON bi.product_id = CONCAT('type_', tt.type_id)
+        LEFT JOIN products p_pkg ON tt.product_id = p_pkg.product_id
+        LEFT JOIN products p ON bi.product_id = p.product_id
+        WHERE bi.booking_id IN ($inQuery)
+    ";
+    $stmtItems = $pdo->prepare($sqlItems);
+    $stmtItems->execute($booking_ids);
+    $all_items = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+
+    $items_by_booking = [];
+    $addons_qty_by_booking = [];
+    foreach ($all_items as $item) {
+        $bid = $item['booking_id'];
+        if (!isset($items_by_booking[$bid])) $items_by_booking[$bid] = [];
+        $items_by_booking[$bid][] = $item['item_name'] . " (x" . $item['quantity'] . ")";
+
+        if ($item['category_id'] == 6) {
+            if (!isset($addons_qty_by_booking[$bid])) $addons_qty_by_booking[$bid] = 0;
+            $addons_qty_by_booking[$bid] += $item['quantity'];
+        }
+    }
+
+    $topups_by_booking = [];
+    if ($addonLogsEnabled) {
+        $sqlTopups = "
+            SELECT booking_id, COUNT(*) as topup_count, MAX(created_at) as last_purchase
+            FROM addon_purchase_logs
+            WHERE booking_id IN ($inQuery) AND action='TOPUP' AND payment_status='paid'
+            GROUP BY booking_id
+        ";
+        $stmtTopups = $pdo->prepare($sqlTopups);
+        $stmtTopups->execute($booking_ids);
+        $all_topups = $stmtTopups->fetchAll(PDO::FETCH_ASSOC);
+        
+        foreach ($all_topups as $tu) {
+            $topups_by_booking[$tu['booking_id']] = $tu;
+        }
+    }
+
+    foreach ($rawTransactions as $t) {
+        $bid = $t['booking_id'];
+        $t['items_summary'] = isset($items_by_booking[$bid]) ? implode('<br>', $items_by_booking[$bid]) : 'No items';
+        $t['addon_qty'] = $addons_qty_by_booking[$bid] ?? 0;
+        $t['has_addons'] = ($t['addon_qty'] > 0);
+        
+        if (isset($topups_by_booking[$bid])) {
+            $t['topup_count'] = $topups_by_booking[$bid]['topup_count'];
+            $t['last_addon_purchase_at'] = $topups_by_booking[$bid]['last_purchase'];
+        } else {
+            $t['topup_count'] = 0;
+            $t['last_addon_purchase_at'] = null;
+        }
+        $transactions[] = $t;
+    }
+}
+
+// =========================================================
+// PART 8: QR WALLETS LOGIC
+// =========================================================
+$qr_wallets = [];
+if ($active_tab === 'qrwallets') {
+    try {
+        $stmtQR = $pdo->query("SELECT * FROM qr_wallets ORDER BY created_at DESC");
+        $qr_wallets = $stmtQR->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        $qr_wallets = [];
+    }
+}
+// =========================================================
+// PART 9: SCANNER LOGS LOGIC (ADDED FOR RECEPTION)
+// =========================================================
+$addonRedeemLogsEnabled = false;
+try {
+    $pdo->query("SELECT 1 FROM addon_redemption_logs LIMIT 1");
+    $addonRedeemLogsEnabled = true;
+} catch (Exception $e) {
+    $addonRedeemLogsEnabled = false;
+}
+
+$scannerStart = isset($_GET['s_start']) ? $_GET['s_start'] : date('Y-m-d');
+$scannerEnd   = isset($_GET['s_end'])   ? $_GET['s_end']   : date('Y-m-d');
+$sqlScannerStart = $scannerStart . ' 00:00:00';
+$sqlScannerEnd   = $scannerEnd . ' 23:59:59';
+
+$scannerFilter = isset($_GET['scanner_pid']) ? strtoupper(trim($_GET['scanner_pid'])) : 'ALL';
+
+$addonProducts = [];
+try {
+    $stmtAdd = $pdo->prepare("SELECT product_id, name FROM products WHERE category_id=6 ORDER BY name ASC");
+    $stmtAdd->execute();
+    $addonProducts = $stmtAdd->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $addonProducts = [];
+}
+
+$scannerLogs = [];
+if ($addonRedeemLogsEnabled) {
+    try {
+        if ($scannerFilter !== 'ALL') {
+            $stmtSL = $pdo->prepare("
+                SELECT l.*, p.name AS product_name
+                FROM addon_redemption_logs l
+                LEFT JOIN products p ON p.product_id = l.product_id
+                WHERE l.redeemed_at BETWEEN ? AND ?
+                AND l.product_id = ?
+                ORDER BY l.redeemed_at DESC
+            ");
+            $stmtSL->execute([$sqlScannerStart, $sqlScannerEnd, $scannerFilter]);
+        } else {
+            $stmtSL = $pdo->prepare("
+                SELECT l.*, p.name AS product_name
+                FROM addon_redemption_logs l
+                LEFT JOIN products p ON p.product_id = l.product_id
+                WHERE l.redeemed_at BETWEEN ? AND ?
+                ORDER BY l.redeemed_at DESC
+            ");
+            $stmtSL->execute([$sqlScannerStart, $sqlScannerEnd]);
+        }
+        $scannerLogs = $stmtSL->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        $scannerLogs = [];
+    }
+}
+
+$entryTicketScannerLogs = [];
+$entryTicketTotals = ['total' => 0, 'adult' => 0, 'children' => 0];
+
+if ($active_tab == 'scanners') {
+    try {
+        $colCheck = $pdo->query("SHOW COLUMNS FROM ticket_instances LIKE 'scanned_by'");
+        $hasScannedBy = (bool)$colCheck->fetch(PDO::FETCH_ASSOC);
+
+        $colCheckExitAt = $pdo->query("SHOW COLUMNS FROM ticket_instances LIKE 'exited_at'");
+        $hasExitedAt = (bool)$colCheckExitAt->fetch(PDO::FETCH_ASSOC);
+
+        $colCheckExitBy = $pdo->query("SHOW COLUMNS FROM ticket_instances LIKE 'exited_by'");
+        $hasExitedBy = (bool)$colCheckExitBy->fetch(PDO::FETCH_ASSOC);
+
+        $selectScannedBy = $hasScannedBy ? "ti.scanned_by" : "NULL AS scanned_by";
+        $selectExitedAt  = $hasExitedAt ? "ti.exited_at" : "NULL AS exited_at";
+        $selectExitedBy  = $hasExitedBy ? "ti.exited_by" : "NULL AS exited_by";
+
+        $stmtEntryScanner = $pdo->prepare("
+            SELECT
+                ti.ticket_id, ti.booking_id, ti.ticket_code, ti.ticket_type, ti.status, ti.is_used, ti.used_at,
+                {$selectScannedBy}, {$selectExitedAt}, {$selectExitedBy},
+                b.visit_date, b.customer_name, b.customer_email, b.customer_phone
+            FROM ticket_instances ti
+            INNER JOIN bookings b ON b.booking_id = ti.booking_id
+            WHERE ti.is_used = 1 AND b.payment_status = 'paid' AND DATE(b.visit_date) BETWEEN ? AND ?
+              AND (LOWER(ti.ticket_type) LIKE '%adult%' OR LOWER(ti.ticket_type) LIKE '%child%' OR LOWER(ti.ticket_type) LIKE '%children%')
+            ORDER BY b.visit_date DESC, ti.used_at DESC, ti.booking_id DESC, ti.ticket_id DESC
+            LIMIT 1000
+        ");
+        $stmtEntryScanner->execute([$scannerStart, $scannerEnd]);
+        $entryTicketScannerLogs = $stmtEntryScanner->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($entryTicketScannerLogs as $etLog) {
+            $entryTicketTotals['total']++;
+            $typeText = strtolower((string)($etLog['ticket_type'] ?? ''));
+            if (strpos($typeText, 'adult') !== false) $entryTicketTotals['adult']++;
+            if (strpos($typeText, 'child') !== false || strpos($typeText, 'children') !== false) $entryTicketTotals['children']++;
+        }
+    } catch (Exception $e) {
+        $entryTicketScannerLogs = [];
+        $entryTicketTotals = ['total' => 0, 'adult' => 0, 'children' => 0];
+    }
+}
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <title>Reception Dashboard - Ajman Water Park</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="shortcut icon" href="/awpfav.png" type="image/x-icon">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    
+    <style>
+        /* Para palaging nasa ibabaw ang SweetAlert2 popups */
+.swal2-container {
+    z-index: 100000 !important;
+}
+/* =========================
+   BASE RESET & RECEPTION STYLES
+========================= */
+*{ box-sizing:border-box; }
+html, body{ width:100%; }
+body{
+  min-height:100vh;
+  margin:0;
+  font-family:'Montserrat','Segoe UI',sans-serif;
+  background:#f0f2f5;
+  color:#333;
+  display:flex;
+}
+img, canvas{ max-width:100%; height:auto; }
+
+.sidebar{
+  width:260px;
+  background:#32BFB6;
+  color:#fff;
+  min-height:100vh;
+  position:fixed;
+  left:0; top:0;
+  display:flex;
+  flex-direction:column;
+}
+.brand{
+  padding:30px 20px;
+  text-align:center;
+  font-size:1.5rem;
+  font-weight:bold;
+  border-bottom:1px solid rgba(255,255,255,0.1);
+  background:#32BFB6;
+}
+.user-panel{
+  padding:20px;
+  text-align:center;
+  border-bottom:1px solid rgba(255,255,255,0.1);
+  background:#00D5EA;
+}
+.nav-links{ padding:20px 0; flex:1; }
+.nav-item{
+  display:flex;
+  align-items:center;
+  gap:15px;
+  padding:15px 25px;
+  color:rgba(255,255,255,0.8);
+  text-decoration:none;
+  transition:.3s;
+  font-size:1.05rem;
+}
+.nav-item:hover,
+.nav-item.active{
+  background:rgba(255,255,255,0.1);
+  color:#fff;
+  border-left:4px solid #4facfe;
+}
+.main{
+  margin-left:260px;
+  padding:30px;
+  width:100%;
+}
+
+.action-btn-group{ display:flex; gap:5px; flex-wrap:wrap; }
+.btn-action{
+  text-decoration:none;
+  padding:6px 10px;
+  border-radius:5px;
+  font-size:.8rem;
+  color:#fff;
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  transition:.2s;
+  border:none;
+  cursor:pointer;
+}
+.btn-addon{ background:#ff7a00; }
+.btn-addon:hover{ background:#e86f00; }
+
+.txn-name-link{
+  color:#003B72;
+  font-weight:800;
+  text-decoration:underline;
+  cursor:pointer;
+}
+.txn-name-link:hover{ opacity:.85; }
+
+.filter-section, .table-section { margin-bottom:30px; }
+.filter-section{
+  background:#fff;
+  padding:20px;
+  border-radius:12px;
+  box-shadow:0 4px 15px rgba(0,0,0,.03);
+  display:flex;
+  flex-wrap:wrap;
+  gap:20px;
+  align-items:flex-end;
+  justify-content:space-between;
+}
+.date-group{ display:flex; gap:15px; align-items:flex-end; flex-wrap:wrap; }
+.form-control{ display:flex; flex-direction:column; gap:5px; }
+.form-control label{ font-size:.85rem; font-weight:700; color:#555; }
+.form-control input,
+.form-control select{ padding:10px; border:1px solid #ddd; border-radius:6px; }
+.btn-filter{ background:#FFD84D; color:#000; border:none; padding:11px 25px; border-radius:6px; cursor:pointer; font-weight:800; }
+
+.quick-links a{
+  font-size:.9rem; color:#003B72; text-decoration:none; margin-left:10px;
+  border:1px solid #003B72; padding:5px 10px; border-radius:20px; transition:.2s;
+}
+.quick-links a:hover{ background:#003B72; color:#fff; }
+
+.table-section{
+  background:#fff; padding:25px; border-radius:12px;
+  box-shadow:0 4px 15px rgba(0,0,0,.03); overflow-x:auto;
+}
+table{ width:100%; border-collapse:collapse; margin-top:15px; min-width:720px; }
+thead{ background:#f8f9fa; border-bottom:2px solid #eee; }
+th{ text-align:left; padding:15px; color:#555; font-size:.85rem; text-transform:uppercase; }
+td{ padding:15px; border-bottom:1px solid #f0f0f0; vertical-align:middle; font-size:.95rem; color:#333; }
+
+.page-tabs{
+  display:flex; gap:10px; margin-bottom:20px; border-bottom:2px solid #ddd;
+  padding-bottom:10px; overflow:hidden;
+}
+.tab-btn{
+  padding:10px 20px; border:none; background:transparent; font-size:1rem;
+  font-weight:800; color:#666; cursor:pointer; border-bottom:3px solid transparent; transition:.2s;
+}
+.tab-btn:hover{ color:#003B72; }
+.tab-btn.active-tab{ color:#003B72; border-bottom-color:#003B72; }
+.tab-content{ display:none; }
+.tab-content.active-content{ display:block; animation:fadeIn .3s; }
+@keyframes fadeIn{ from{ opacity:0; transform:translateY(5px); } to{ opacity:1; transform:translateY(0); } }
+
+.badge{ padding:4px 8px; border-radius:4px; font-size:.8rem; font-weight:800; }
+.bg-active{ background:#d4edda; color:#155724; }
+.bg-expired{ background:#f8d7da; color:#721c24; }
+.msg-box{ padding:15px; margin-bottom:20px; border-radius:8px; font-weight:800; }
+.bg-success{ background:#d4edda; color:#155724; }
+.bg-error{ background:#f8d7da; color:#721c24; }
+
+.modal-overlay{
+  position: fixed; inset: 0; background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; z-index: 9999; box-sizing: border-box;
+}
+.modal-box{
+  box-sizing: border-box; width: 100%; max-width: 720px;
+  max-height: calc(100vh - 32px); overflow: auto;
+  background: #fff; border-radius: 16px; padding: 18px; position: relative;
+}
+.modal-close{ position: absolute; top: 10px; right: 12px; text-decoration: none; font-size: 28px; line-height: 1; color: #666; }
+.history-list{ list-style: none; padding: 0; margin: 0; }
+.history-item{ display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid #f0f0f0; border-radius: 12px; margin-bottom: 10px; box-sizing: border-box; }
+.history-item > span{ min-width: 0; word-break: break-word; }
+.history-item > span:last-child{ margin-left: auto; text-align: right; white-space: nowrap; }
+.chip{ display:inline-block; padding:3px 10px; border-radius:999px; font-size:.78rem; font-weight:900; background:#fff3e0; color:#c25a00; border:1px solid #ffd2a8; margin-left:6px; }
+
+/* Stats Row specifically for QR Wallets top stat */
+.stats-row{
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:20px; margin-bottom:30px;
+}
+.card{
+  background:#fff; padding:25px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,.03);
+  display:flex; justify-content:space-between; align-items:center; border-left:5px solid transparent;
+}
+.card-info h3{ margin:0; font-size:1.8rem; color:#333; }
+.card-icon{ font-size:2.5rem; opacity:.15; }
+
+/* Responsive adjustments */
+@media (max-width:1024px){
+  body{ display:block; }
+  .sidebar{ position:sticky; top:0; width:100%; min-height:auto; height:auto; flex-direction:row; align-items:center; z-index:999; }
+  .brand, .user-panel{ display:none; }
+  .nav-links{ display:flex; gap:6px; padding:10px; overflow-x:auto; white-space:nowrap; width:100%; scrollbar-width:none; }
+  .nav-item{ flex:0 0 auto; padding:10px 14px; border-left:none !important; border-bottom:3px solid transparent; }
+  .nav-item.active{ border-bottom-color:#4facfe; background:rgba(255,255,255,.12); }
+  .main{ margin-left:0; padding:16px; width:100%; }
+  .page-tabs{ overflow-x:auto; white-space:nowrap; }
+  .tab-btn{ flex:0 0 auto; }
+  .filter-section{ flex-direction:column; align-items:stretch; gap:12px; }
+}
+@media (max-width:820px) {
+  .modal-overlay { padding: 14px; align-items: flex-start; }
+  .modal-box { width: min(980px, 96vw); max-width: none; max-height: 92vh; overflow: auto; padding: 18px; }
+  .modal-box table { min-width: 720px; }
+  .modal-grid-2 { grid-template-columns: 1fr !important; gap: 12px !important; }
+}
+.sales-form-box { background: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #ddd; width: 48%; display: inline-block; vertical-align: top; margin-right: 2%; box-sizing: border-box;}
+@media(max-width: 768px) { .sales-form-box { width: 100%; margin-bottom: 15px; display: block; } }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+</head>
+<body>
+
+    <div class="sidebar">
+        <div class="brand"><i class="fas fa-water"></i> Ajman Water Park</div>
+        
+        <div class="user-panel">
+            <div style="font-size: 0.95rem; font-weight: bold; color: #ffe100;">Welcome</div>
+            <div style="font-weight: bold; font-size: 1.1rem;">
+                <?php echo htmlspecialchars($_SESSION['admin_fullname'] ?? $_SESSION['admin_username'] ?? 'Reception'); ?>
+            </div>
+            <div style="font-size: 0.95rem; font-weight: bold; color: #ffe100; background: rgba(251, 172, 172, 0.2); display: inline-block; padding: 2px 8px; border-radius: 10px; margin-top: 5px;">
+                RECEPTION DEPARTMENT
+            </div>
+        </div>
+
+        <div class="nav-links">
+            <a href="?view=walkin_pos" class="nav-item <?php echo $active_tab == 'walkin_pos' ? 'active' : ''; ?>"><i class="fas fa-desktop"></i> Walk-in POS</a>
+            <a href="?view=pending_walkins" class="nav-item <?php echo $active_tab == 'pending_walkins' ? 'active' : ''; ?>"><i class="fas fa-clock"></i> Pending Walk-ins</a>
+            <a href="?view=sales" class="nav-item <?php echo $active_tab == 'sales' ? 'active' : ''; ?>"><i class="fas fa-receipt"></i> Transaction History</a>
+            <a href="?view=sales_report" class="nav-item <?php echo $active_tab == 'sales_report' ? 'active' : ''; ?>"><i class="fas fa-file-excel"></i> Sales Report</a>
+            <a href="?view=reschedule" class="nav-item <?php echo $active_tab == 'reschedule' ? 'active' : ''; ?>"><i class="fas fa-calendar-check"></i> Reschedule</a>
+            <a href="?view=qrwallets" class="nav-item <?php echo $active_tab == 'qrwallets' ? 'active' : ''; ?>"><i class="fas fa-wallet"></i> QR Wallets</a>
+            <a href="?view=scanners" class="nav-item <?php echo $active_tab == 'scanners' ? 'active' : ''; ?>"><i class="fas fa-qrcode"></i> Scanner Logs</a>
+        </div>
+
+        <a href="admin_logout.php" class="nav-item" style="color: #ff6b6b; margin-top: auto; border-top: 1px solid rgba(255,255,255,0.1);">
+            <i class="fas fa-sign-out-alt"></i> Logout
+        </a>
+    </div>
+
+    <div class="main">
+        
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="color: #003B72; margin: 0;">Reception Control Panel</h2>
+        </div>
+
+        <div class="page-tabs">
+            <button class="tab-btn <?php echo $active_tab == 'walkin_pos' ? 'active-tab' : ''; ?>" onclick="switchTab('walkin_pos')">
+                <i class="fas fa-desktop"></i> Walk-in POS
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'pending_walkins' ? 'active-tab' : ''; ?>" onclick="switchTab('pending_walkins')">
+                <i class="fas fa-clock"></i> Pending Walk-ins
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'sales' ? 'active-tab' : ''; ?>" onclick="switchTab('sales')">
+                <i class="fas fa-receipt"></i> Transaction History
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'sales_report' ? 'active-tab' : ''; ?>" onclick="switchTab('sales_report')">
+                <i class="fas fa-file-excel"></i> Sales Report
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'reschedule' ? 'active-tab' : ''; ?>" onclick="switchTab('reschedule')">
+                <i class="fas fa-calendar-check"></i> Reschedule
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'qrwallets' ? 'active-tab' : ''; ?>" onclick="switchTab('qrwallets')">
+                <i class="fas fa-wallet"></i> QR Wallets
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'scanners' ? 'active-tab' : ''; ?>" onclick="switchTab('scanners')">
+    <i class="fas fa-qrcode"></i> Scanner Logs
+</button>
+        </div>
+
+
+        <div id="view-walkin_pos" class="tab-content <?php echo $active_tab == 'walkin_pos' ? 'active-content' : ''; ?>" style="margin: 0 -30px -30px -30px; height: calc(100vh - 120px);">
+            <iframe src="pos_terminal.php" width="100%" height="100%" style="border: none; display: block;"></iframe>
+        </div>
+
+
+        <div id="view-pending_walkins" class="tab-content <?php echo $active_tab == 'pending_walkins' ? 'active-content' : ''; ?>">
+            <?php if($active_tab == 'pending_walkins' && isset($_GET['msg'])): ?>
+                <div class="msg-box bg-success"><i class="fas fa-check-circle"></i> <?php echo htmlspecialchars($_GET['msg']); ?></div>
+            <?php endif; ?>
+            <?php if($active_tab == 'pending_walkins' && isset($_GET['error'])): ?>
+                <div class="msg-box bg-error"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($_GET['error']); ?></div>
+            <?php endif; ?>
+            <div class="table-section">
+                <h3 style="margin-top: 0; color: #003B72; font-size: 1.1rem; margin-bottom: 15px;">
+                    <i class="fas fa-clock" style="color: #f59e0b;"></i> Pending Cash / Pay at Counter Bookings
+                </h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Booking ID</th>
+                            <th>Customer Name</th>
+                            <th>Total Amount</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $stmtPending = $pdo->query("SELECT * FROM bookings WHERE payment_method IN ('pay_at_counter', 'cash') AND payment_status = 'pending' ORDER BY created_at DESC");
+                        $pendingCount = 0;
+                        while ($row = $stmtPending->fetch(PDO::FETCH_ASSOC)) {
+                            $pendingCount++;
+                            $padId = str_pad($row['booking_id'], 6, '0', STR_PAD_LEFT);
+                            ?>
+                            <tr>
+                                <td><span style='background:#e3f2fd; color:#0d47a1; padding:4px 8px; border-radius:4px; font-weight:bold;'>#<?php echo $padId; ?></span></td>
+                                <td style='font-weight:bold; color:#003B72;'><?php echo htmlspecialchars($row['customer_name']); ?></td>
+                                <td style='font-weight:900; color:#155724;'>AED <?php echo number_format($row['total_amount'], 2); ?></td>
+                                <td><span class='badge' style='background: #fff3cd; color: #856404;'><i class='fas fa-clock'></i> Pending</span></td>
+                                <td>
+                                    <div class="action-btn-group" style="display: flex; gap: 5px;">
+                                        <button class='btn-action' style='background: #28a745; font-weight:bold;' 
+                                                onclick='openCashModal(<?php echo $row['booking_id']; ?>, <?php echo $row['total_amount']; ?>)'>
+                                            <i class='fas fa-money-bill-wave'></i> Receive Cash
+                                        </button>
+                                        <button type="button" 
+   onclick="confirmDecline(<?php echo $row['booking_id']; ?>)" 
+   class="btn btn-danger" 
+   style="background-color: #dc3545; color: white; padding: 6px 12px; border-radius: 5px; border: none; display: inline-block; margin-left: 5px; cursor: pointer;">
+    <i class="fas fa-times"></i> Decline
+</button>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php
+                        }
+                        if ($pendingCount === 0) {
+                            echo "<tr><td colspan='5' style='text-align:center; padding:40px; color:#999;'>No pending walk-in bookings at the moment.</td></tr>";
+                        }
+                        ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+
+        <div id="view-sales" class="tab-content <?php echo $active_tab == 'sales' ? 'active-content' : ''; ?>">
+            
+            <div class="filter-section">
+                <form method="GET" style="display: flex; gap: 20px; align-items: flex-end; flex-wrap: wrap;">
+                    <input type="hidden" name="view" value="sales">
+                    <div class="date-group">
+                        <div class="form-control">
+                            <label>From:</label>
+                            <input type="date" name="start_date" value="<?php echo $start_date; ?>" required>
+                        </div>
+                        <div class="form-control">
+                            <label>To:</label>
+                            <input type="date" name="end_date" value="<?php echo $end_date; ?>" required>
+                        </div>
+                        <div class="form-control">
+                            <label>Receptionist:</label>
+                            <select name="cashier" style="padding:10px; border:1px solid #ddd; border-radius:6px; min-width:160px;">
+                                <option value="all">All Receptionists</option>
+                                <?php foreach($adminList as $adm): 
+                                      // Gamitin ang full_name kung meron, kung wala, username
+                                      $admName = !empty($adm['full_name']) ? $adm['full_name'] : $adm['username']; 
+                                ?>
+                                    <option value="<?php echo htmlspecialchars($admName); ?>" <?php echo ($filter_cashier === $admName) ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars($admName); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn-filter"><i class="fas fa-filter"></i> Filter</button>
+                    </div>
+                </form>
+
+                <div class="quick-links">
+                    <span style="font-size:0.85rem; font-weight:bold; color:#555;">Quick View:</span>
+                    <a href="?view=sales&start_date=<?php echo date('Y-m-d'); ?>&end_date=<?php echo date('Y-m-d'); ?>">Today</a>
+                    <a href="?view=sales&start_date=<?php echo date('Y-m-01'); ?>&end_date=<?php echo date('Y-m-d'); ?>">This Month</a>
+                </div>
+            </div>
+
+            <div class="table-section">
+                <h3 style="margin-top: 0; color: #003B72; font-size: 1.1rem; margin-bottom: 15px;">Transaction History</h3>
+                
+                <?php 
+                $hasPaidTransactions = false;
+                foreach($transactions as $chk) {
+                    if (strtolower($chk['payment_status']) !== 'pending') {
+                        $hasPaidTransactions = true;
+                        break;
+                    }
+                }
+                ?>
+
+                <?php if($hasPaidTransactions): ?>
+                <table>
+                    <thead>
+                        <tr>
+                            <th width="5%">No.</th>
+                            <th width="8%">ID</th>
+                            <th width="16%">Customer Name</th>
+                            <th width="21%">Package Items</th>
+                            <th width="10%">Paid Date</th>
+                            <th width="10%">Visit Date</th>
+                            <th width="10%">Amount</th>
+                            <th width="7%">Status</th>
+                            <th width="8%">Method</th>
+                            <th width="5%">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php $rowNum = 1; foreach($transactions as $t): ?>
+                        <?php 
+                            if(strtolower($t['payment_status']) === 'pending') { continue; }
+                        ?>
+                        <tr>
+                            <td style="font-weight: 800; color: #666; font-size: 1rem;"><?php echo $rowNum++; ?></td>
+                            <td>
+                                <span style="background:#e3f2fd; color:#0d47a1; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:0.85rem;">
+                                    #<?php echo str_pad($t['booking_id'], 6, '0', STR_PAD_LEFT); ?>
+                                </span>
+                            </td>
+                            <td style="font-weight: 600;">
+                                <a class="txn-name-link"
+                                   href="?view=sales&start_date=<?php echo urlencode($start_date); ?>&end_date=<?php echo urlencode($end_date); ?>&booking_details_id=<?php echo (int)$t['booking_id']; ?>"
+                                   title="Click to view full details" style="font-size: 1.05rem;">
+                                    <?php echo htmlspecialchars($t['customer_name']); ?>
+                                </a>
+                                
+                                <div style="font-size: 0.85rem; color: #555; margin-top: 4px; font-weight: normal; line-height: 1.4;">
+                                    <?php echo htmlspecialchars($t['customer_email'] ?? ''); ?><br>
+                                    <?php echo htmlspecialchars($t['customer_phone'] ?? ''); ?>
+                                </div>
+
+                                <div style="font-size: 0.8rem; color: #666; margin-top: 5px;">
+                                    Received by: <strong style="color: #003B72;">
+                                        <?php 
+                                            $receivedBy = (!empty($t['cashier_name'])) ? $t['cashier_name'] : 'Online / System';
+                                            echo htmlspecialchars($receivedBy); 
+                                        ?>
+                                    </strong>
+                                </div>
+                            </td>                            
+                            <td style="color:#555; line-height: 1.5; font-size:0.9rem;">
+                                <?php echo $t['items_summary']; ?>
+                                <?php if(!empty($t['has_addons'])): ?>
+                                    <div style="margin-top:6px; font-size:0.82rem; font-weight:bold; color:#ff7a00;">
+                                        Add-ons: YES (x<?php echo (int)$t['addon_qty']; ?>)
+                                        <?php if(!empty($t['topup_count'])): ?>
+                                            • Top-ups: <?php echo (int)$t['topup_count']; ?>
+                                        <?php endif; ?>
+                                        <?php if(!empty($t['last_addon_purchase_at'])): ?>
+                                            <div style="margin-top:2px; color:#666; font-weight:600;">
+                                                Last Top-up: <?php echo date("M d, Y h:i A", strtotime($t['last_addon_purchase_at'])); ?>
+                                            </div>
+                                        <?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </td>
+                            <td><?php echo date("M d, Y h:i A", strtotime($t['created_at'])); ?></td>
+                            <td style="font-weight:bold; color:#003B72;">
+                                <?php echo !empty($t['visit_date']) ? date("M d, Y", strtotime($t['visit_date'])) : '-'; ?>
+                            </td>
+                            <td style="font-weight:bold; color:#155724;">AED <?php echo number_format($t['total_amount'], 2); ?></td>
+                            <td>
+                                <?php 
+                                $isQR = (strpos($t['items_summary'], 'QR Wallet') !== false);
+                                $isClaimed = $t['is_redeemed'] || (!empty($t['used_tix_count']) && $t['used_tix_count'] > 0) || (!empty($t['pass_visit_count']) && $t['pass_visit_count'] > 0);
+                                
+                                if($isQR): ?>
+                                    <span class="badge" style="background:#d4edda; color:#155724; border:1px solid #c3e6cb;"><i class="fas fa-wallet"></i> FUNDED / ACTIVE</span>
+                                <?php elseif($isClaimed): ?>
+                                    <span class="badge bg-active"><i class="fas fa-check-circle"></i> CLAIMED</span>
+                                    <div style="font-size:0.75rem; color:#666; margin-top:4px;">By: <?php echo htmlspecialchars($t['redeemed_by'] ?: 'System'); ?></div>
+                                <?php else: ?>
+                                    <span class="badge" style="background:#f0f2f5; color:#555; border:1px solid #ddd;">UNCLAIMED</span>
+                                <?php endif; ?>
+                            </td>
+                            <td style="font-weight: bold; font-size: 0.82rem; color: #444; line-height: 1.3;">
+                                <?php 
+                                    $method = $t['payment_method'] ?? '';
+                                    $method_lower = strtolower($method);
+                                    $isManualPayment = !empty($t['cashier_name']);
+                                    if($method_lower === 'qr_points') {
+                                        echo '<span style="color:#0ea5e9;"><i class="fas fa-wallet"></i> QR CARD</span>';
+                                    } elseif($method_lower === 'cash') {
+                                        echo '<span style="color:#28a745;"><i class="fas fa-money-bill-wave"></i> CASH</span>';
+                                    } elseif($method_lower === 'card' || $method_lower === 'credit card') {
+                                        if ($isManualPayment) {
+                                            echo '<span style="color:#e65100; background:#fff3e0; padding:3px 6px; border-radius:4px; display:inline-block;"><i class="fas fa-credit-card"></i> CARD<br><small style="font-size:0.7rem;">(Manual)</small></span>';
+                                        } else {
+                                            echo '<span style="color:#0d6efd; background:#e3f2fd; padding:3px 6px; border-radius:4px; display:inline-block;"><i class="fas fa-credit-card"></i> CARD<br><small style="font-size:0.7rem;">(Online)</small></span>';
+                                        }
+                                    } elseif(strpos($method_lower, 'cash:') !== false || strpos($method_lower, 'card:') !== false) {
+                                        echo '<span style="color:#6f42c1; background:#f3e8ff; padding:3px 6px; border-radius:4px; display:inline-block;"><i class="fas fa-calculator"></i> ' . htmlspecialchars(strtoupper($method)) . '</span>';
+                                    } else {
+                                        echo strtoupper(htmlspecialchars($method ?: 'UNKNOWN')); 
+                                    }
+                                ?>
+                            </td>
+                            <td>
+                                <div class="action-btn-group">
+                                    <a href="?view=sales&addon_history_id=<?php echo (int)$t['booking_id']; ?>" class="btn-action btn-addon" title="View Add-on History">
+                                        <i class="fas fa-history"></i> Add-ons
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <?php else: ?>
+                    <div style="text-align:center; padding: 40px; color:#999;">No paid transactions found.</div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+
+<div id="view-sales_report" class="tab-content <?php echo $active_tab == 'sales_report' ? 'active-content' : ''; ?>">
+            <div class="filter-section printable-area">
+                <h3 style="margin:0; color:#003B72; width: 100%; margin-bottom: 15px;"><i class="fas fa-file-invoice-dollar"></i> Generate Sales Report</h3>
+                
+                <form method="GET" action="export_sales.php" target="_blank" class="sales-form-box" onsubmit="return validateForm(this)">
+                    <input type="hidden" name="type" value="daily">
+                    <h4 style="margin-top:0; color: #003B72;"><i class="fas fa-calendar-day"></i> Daily Report</h4>
+                    
+                    <div class="form-control" style="margin-bottom: 15px;">
+                        <label>Select Date:</label>
+                        <input type="date" name="report_date" value="<?php echo date('Y-m-d'); ?>" required>
+                    </div>
+                    
+                  <div class="form-control" style="margin-bottom: 15px;">
+                        <label>Filter Payment Method:</label>
+                        <select name="filter_payment" style="padding:10px; border:1px solid #ddd; border-radius:6px; width:100%;">
+                            <option value="all">All Payment Methods</option>
+                            <option value="cash">Cash / Mixed Payments</option>
+                            <option value="card">Credit Cards</option>
+                            <option value="qr_points">QR Wallet Cards</option>
+                        </select>
+                    </div>
+
+                    <div class="form-control" style="margin-bottom: 15px;">
+                        <label>Filter Payment Reciever:</label>
+                        <select name="filter_cashier" style="padding:10px; border:1px solid #ddd; border-radius:6px; width:100%;">
+                            <option value="all">All Payment Reciever</option>
+                            <option value="online_system">Online / System Only</option>
+                            <?php foreach($adminList as $adm): 
+                                  $admName = !empty($adm['full_name']) ? $adm['full_name'] : $adm['username']; 
+                            ?>
+                                <option value="<?php echo htmlspecialchars($admName); ?>">
+                                    <?php echo htmlspecialchars($admName); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+                    <div class="form-control" style="margin-bottom: 20px;">
+                        <label style="font-weight: 800; margin-bottom: 6px;">Include Categories (Select multiple/any combinations):</label>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; background: #ffffff; padding: 12px; border: 1px solid #ddd; border-radius: 6px;">
+                            <label style="font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem;">
+                                <input type="checkbox" name="filter_categories[]" value="tickets" checked style="width:16px; height:16px;"> 🎟️ Tickets
+                            </label>
+                            <label style="font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem;">
+                                <input type="checkbox" name="filter_categories[]" value="qr_wallet" checked style="width:16px; height:16px;"> 💳 QR Wallet
+                            </label>
+                            <label style="font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem;">
+                                <input type="checkbox" name="filter_categories[]" value="annual_passes" checked style="width:16px; height:16px;"> 👑 Annual Passes
+                            </label>
+                            <label style="font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem;">
+                                <input type="checkbox" name="filter_categories[]" value="addons" checked style="width:16px; height:16px;"> 🍔 Add-ons
+                            </label>
+                        </div>
+                    </div>
+
+                    <div style="display:flex; gap:10px;">
+                        <button type="submit" name="action" value="excel" class="btn-filter" style="background:#28a745; color:white; flex:1;"><i class="fas fa-file-excel"></i> Excel</button>
+                        <button type="submit" name="action" value="print" class="btn-filter" style="background:#17a2b8; color:white; flex:1;"><i class="fas fa-print"></i> Print View</button>
+                    </div>
+                </form>
+
+                <form method="GET" action="export_sales.php" target="_blank" class="sales-form-box" style="margin-right: 0;" onsubmit="return validateForm(this)">
+                    <input type="hidden" name="type" value="monthly">
+                    <h4 style="margin-top:0; color: #003B72;"><i class="fas fa-calendar-alt"></i> Monthly Report</h4>
+                    
+                    <div class="form-control" style="margin-bottom: 15px;">
+                        <label>Select Month:</label>
+                        <input type="month" name="report_month" value="<?php echo date('Y-m'); ?>" required>
+                    </div>
+                    
+                   <div class="form-control" style="margin-bottom: 15px;">
+                        <label>Filter Payment Method:</label>
+                        <select name="filter_payment" style="padding:10px; border:1px solid #ddd; border-radius:6px; width:100%;">
+                            <option value="all">All Payment Methods</option>
+                            <option value="cash">Cash / Mixed Payments</option>
+                            <option value="card">Credit Cards</option>
+                            <option value="qr_points">QR Wallet Cards</option>
+                        </select>
+                    </div>
+
+                    <div class="form-control" style="margin-bottom: 15px;">
+                        <label>Filter Payment Reciever:</label>
+                        <select name="filter_cashier" style="padding:10px; border:1px solid #ddd; border-radius:6px; width:100%;">
+                            <option value="all">All Receptionists</option>
+                            <option value="online_system">Online / System Only</option>
+                            <?php foreach($adminList as $adm): 
+                                  $admName = !empty($adm['full_name']) ? $adm['full_name'] : $adm['username']; 
+                            ?>
+                                <option value="<?php echo htmlspecialchars($admName); ?>">
+                                    <?php echo htmlspecialchars($admName); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+
+                    <div class="form-control" style="margin-bottom: 20px;">
+                        <label style="font-weight: 800; margin-bottom: 6px;">Include Categories (Select multiple/any combinations):</label>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; background: #ffffff; padding: 12px; border: 1px solid #ddd; border-radius: 6px;">
+                            <label style="font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem;">
+                                <input type="checkbox" name="filter_categories[]" value="tickets" checked style="width:16px; height:16px;"> 🎟️ Tickets
+                            </label>
+                            <label style="font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem;">
+                                <input type="checkbox" name="filter_categories[]" value="qr_wallet" checked style="width:16px; height:16px;"> 💳 QR Wallet
+                            </label>
+                            <label style="font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem;">
+                                <input type="checkbox" name="filter_categories[]" value="annual_passes" checked style="width:16px; height:16px;"> 👑 Annual Passes
+                            </label>
+                            <label style="font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem;">
+                                <input type="checkbox" name="filter_categories[]" value="addons" checked style="width:16px; height:16px;"> 🍔 Add-ons
+                            </label>
+                        </div>
+                    </div>
+
+                    <div style="display:flex; gap:10px;">
+                        <button type="submit" name="action" value="excel" class="btn-filter" style="background:#28a745; color:white; flex:1;"><i class="fas fa-file-excel"></i> Excel</button>
+                        <button type="submit" name="action" value="print" class="btn-filter" style="background:#17a2b8; color:white; flex:1;"><i class="fas fa-print"></i> Print View</button>
+                    </div>
+                </form>
+            </div>
+            
+            <script>
+            function validateForm(formElement) {
+                const checkedBoxes = formElement.querySelectorAll('input[name="filter_categories[]"]:checked');
+                if (checkedBoxes.length === 0) {
+                    alert("Please select at least one category type to generate a report!");
+                    return false;
+                }
+                return true;
+            }
+            </script>
+        </div>
+
+        <div id="view-reschedule" class="tab-content <?php echo $active_tab == 'reschedule' ? 'active-content' : ''; ?>">
+            
+            <?php if(isset($_GET['msg'])): ?>
+                <div class="msg-box bg-success"><i class="fas fa-check-circle"></i> <?php echo htmlspecialchars($_GET['msg']); ?></div>
+            <?php endif; ?>
+            <?php if(isset($_GET['error'])): ?>
+                <div class="msg-box bg-error"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($_GET['error']); ?></div>
+            <?php endif; ?>
+
+            <div class="filter-section">
+                <form method="GET" style="display:flex; gap:20px; align-items:flex-end; flex-wrap:wrap; width: 100%;">
+                    <input type="hidden" name="view" value="reschedule">
+                    
+                    <div class="form-control" style="flex:1; min-width: 250px;">
+                        <label>Search (Name, Email, or Booking ID)</label>
+                        <input type="text" name="r_search" value="<?php echo htmlspecialchars($_GET['r_search'] ?? ''); ?>" placeholder="e.g. Rainier or 28">
+                    </div>
+
+                    <div class="date-group">
+                        <div class="form-control">
+                            <label>Visit Date From:</label>
+                            <input type="date" name="r_from" value="<?php echo htmlspecialchars($_GET['r_from'] ?? ''); ?>">
+                        </div>
+                        <div class="form-control">
+                            <label>Visit Date To:</label>
+                            <input type="date" name="r_to" value="<?php echo htmlspecialchars($_GET['r_to'] ?? ''); ?>">
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn-filter" style="background:#003B72; color:#fff;"><i class="fas fa-search"></i> Search</button>
+                    <a href="?view=reschedule" class="btn-filter" style="background:#ddd; color:#333; text-decoration:none; padding:11px 25px; border-radius:6px; font-weight:bold; text-align: center;">Clear</a>
+                </form>
+            </div>
+
+            <div class="table-section">
+                <h3 style="margin-top:0; color:#003B72; font-size:1.1rem; margin-bottom:15px;">Bookings Available for Reschedule</h3>
+                
+                <?php if(count($reschedule_data) > 0): ?>
+                <table>
+                    <thead>
+                        <tr>
+                            <th width="10%">ID</th>
+                            <th width="25%">Customer</th>
+                            <th width="15%">Current Visit Date</th>
+                            <th width="15%">Status</th>
+                            <th width="20%">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach($reschedule_data as $b): ?>
+                        <tr>
+                            <td>
+                                <span style="background:#e3f2fd; color:#0d47a1; padding:4px 8px; border-radius:4px; font-weight:bold;">
+                                    #<?php echo str_pad($b['booking_id'], 6, '0', STR_PAD_LEFT); ?>
+                                </span>
+                            </td>
+                            <td style="font-weight:600;">
+                                <?php echo htmlspecialchars($b['customer_name']); ?><br>
+                                <span style="font-size:0.85rem; color:#666; font-weight:normal;"><i class="fas fa-envelope"></i> <?php echo htmlspecialchars($b['customer_email']); ?></span>
+                            </td>
+                            <td style="font-weight:bold; color:#003B72;">
+                                <?php echo date("M d, Y", strtotime($b['visit_date'])); ?>
+                            </td>
+                            <td>
+                                <?php if($b['used_tickets_count'] > 0): ?>
+                                    <span class="badge bg-expired"><i class="fas fa-times-circle"></i> USED (<?php echo $b['used_tickets_count']; ?>)</span>
+                                <?php else: ?>
+                                    <span class="badge bg-active"><i class="fas fa-check-circle"></i> UNCLAIMED</span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <?php if($b['used_tickets_count'] == 0): ?>
+                                    <button type="button" class="btn-action" onclick="openRescheduleModal(<?php echo $b['booking_id']; ?>, '<?php echo date("M d, Y", strtotime($b['visit_date'])); ?>')" style="background:#17a2b8; border:none; cursor:pointer;">
+                                        <i class="fas fa-calendar-alt"></i> Reschedule
+                                    </button>
+                                <?php else: ?>
+                                    <span style="color:#999; font-size:0.85rem; font-style:italic;">Cannot modify</span>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <?php else: ?>
+                    <div style="text-align:center; padding:40px; color:#999;">No bookings found matching your search.</div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+
+        <div id="view-qrwallets" class="tab-content <?php echo $active_tab == 'qrwallets' ? 'active-content' : ''; ?>">
+            <div class="stats-row">
+                <div class="card" style="border-left-color: #0ea5e9;">
+                    <div class="card-info">
+                        <?php
+                        $activeWalletCount = 0;
+                        foreach($qr_wallets as $qr) {
+                            if($qr['status'] !== 'pending') $activeWalletCount++;
+                        }
+                        ?>
+                        <h3><?php echo $activeWalletCount; ?></h3>
+                        <p>Total Active QR Wallets</p>
+                    </div>
+                    <div class="card-icon" style="color:#0ea5e9;"><i class="fas fa-wallet"></i></div>
+                </div>
+            </div>
+
+            <div class="table-section">
+                <h3 style="margin-top: 0; color: #003B72; font-size: 1.1rem; margin-bottom: 15px;">QR Wallet Accounts & Balances</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th width="5%">No.</th>
+                            <th width="10%">ID</th>
+                            <th width="25%">Customer Details</th>
+                            <th width="20%">QR Code Ref</th>
+                            <th width="15%">Balance</th>
+                            <th width="15%">Status</th>
+                            <th width="10%">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if(count($qr_wallets) > 0): ?>
+                            <?php $rowNum = 1; foreach($qr_wallets as $qr): ?>
+                            <?php 
+                                if($qr['status'] === 'pending') { continue; }
+                            ?>
+                            <tr>
+                                <td style="font-weight: 800; color: #666; font-size: 1rem;"><?php echo $rowNum++; ?></td>
+                                <td>
+                                    <span style="background:#e3f2fd; color:#0d47a1; padding:4px 8px; border-radius:4px; font-weight:bold;">
+                                        W-<?php echo str_pad($qr['wallet_id'], 4, '0', STR_PAD_LEFT); ?>
+                                    </span>
+                                </td>
+                                <td>
+                                    <a href="javascript:void(0);" onclick="openWalletHistory(<?php echo $qr['wallet_id']; ?>, '<?php echo htmlspecialchars(addslashes($qr['customer_name'])); ?>')" style="color:#003B72; font-size: 1.05rem; font-weight:900; text-decoration:underline; cursor:pointer;" title="View Transaction History">
+                                        <?php echo htmlspecialchars($qr['customer_name']); ?>
+                                    </a><br>
+                                    <span style="font-size:0.85rem; color:#666;"><i class="fas fa-envelope"></i> <?php echo htmlspecialchars($qr['customer_email']); ?></span><br>
+                                    <span style="font-size:0.85rem; color:#666;"><i class="fas fa-phone"></i> <?php echo htmlspecialchars($qr['phone']); ?></span>
+                                </td>
+                                <td>
+                                    <span style="font-family:monospace; font-weight:bold; color:#444; background:#f0f2f5; padding: 4px 8px; border-radius: 4px; border: 1px solid #ddd;">
+                                        <?php echo htmlspecialchars($qr['qr_code']); ?>
+                                    </span>
+                                </td>
+                                <td style="font-weight:900; color:#155724; font-size:1.1rem;">
+                                    AED <?php echo number_format($qr['balance'], 2); ?>
+                                </td>
+                                <td>
+                                    <?php if($qr['status'] == 'active'): ?>
+                                        <span class="badge bg-active"><i class="fas fa-check-circle"></i> Active</span>
+                                    <?php else: ?>
+                                        <span class="badge bg-expired"><i class="fas fa-ban"></i> Blocked</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <div style="display: flex; gap: 5px; flex-direction: column;">
+                                        <button style="background:#0ea5e9; color:#fff; border:none; padding:8px 12px; border-radius:6px; cursor:pointer; font-weight:bold; width: 100%;" 
+                                            onclick="printQRCard('<?php echo htmlspecialchars($qr['qr_code']); ?>', '<?php echo htmlspecialchars(addslashes($qr['customer_name'])); ?>', '<?php echo str_pad($qr['wallet_id'], 4, '0', STR_PAD_LEFT); ?>')">
+                                            <i class="fas fa-print"></i> Print
+                                        </button>
+                                        <button style="background:#28a745; color:#fff; border:none; padding:8px 12px; border-radius:6px; cursor:pointer; font-weight:bold; width: 100%;" 
+                                            onclick="downloadQRCard('<?php echo htmlspecialchars($qr['qr_code']); ?>', '<?php echo htmlspecialchars(addslashes($qr['customer_name'])); ?>', '<?php echo str_pad($qr['wallet_id'], 4, '0', STR_PAD_LEFT); ?>')">
+                                            <i class="fas fa-download"></i> Download
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                            
+                            <?php if($rowNum === 1): ?>
+                                <tr><td colspan="7" style="text-align:center; padding:40px; color:#999;">No Active QR Wallets found.</td></tr>
+                            <?php endif; ?>
+                        <?php else: ?>
+                            <tr><td colspan="7" style="text-align:center; padding:40px; color:#999;">No QR Wallets found.</td></tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div id="view-scanners" class="tab-content <?php echo $active_tab == 'scanners' ? 'active-content' : ''; ?>">
+
+            <div class="filter-section">
+                <form method="GET" style="display:flex; gap:20px; align-items:flex-end; flex-wrap:wrap;">
+                    <input type="hidden" name="view" value="scanners">
+
+                    <div class="date-group">
+                        <div class="form-control">
+                            <label>From:</label>
+                            <input type="date" name="s_start" value="<?php echo htmlspecialchars($scannerStart); ?>" required>
+                        </div>
+                        <div class="form-control">
+                            <label>To:</label>
+                            <input type="date" name="s_end" value="<?php echo htmlspecialchars($scannerEnd); ?>" required>
+                        </div>
+                    </div>
+
+                    <div class="form-control">
+                        <label>Scanner (Add-on):</label>
+                        <select name="scanner_pid" style="padding:10px; border:1px solid #ddd; border-radius:6px;">
+                            <option value="ALL" <?php echo ($scannerFilter==='ALL')?'selected':''; ?>>All</option>
+                            <?php foreach($addonProducts as $ap): ?>
+                                <option value="<?php echo htmlspecialchars($ap['product_id']); ?>" <?php echo ($scannerFilter===strtoupper($ap['product_id']))?'selected':''; ?>>
+                                    <?php echo htmlspecialchars($ap['name']); ?> (<?php echo htmlspecialchars($ap['product_id']); ?>)
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+                    <button type="submit" class="btn-filter"><i class="fas fa-filter"></i> Filter</button>
+                </form>
+
+                <div class="quick-links">
+                    <span style="font-size:0.85rem; font-weight:bold; color:#555;">Quick View:</span>
+                    <a href="?view=scanners&s_start=<?php echo date('Y-m-d'); ?>&s_end=<?php echo date('Y-m-d'); ?>&scanner_pid=<?php echo urlencode($scannerFilter); ?>">Today</a>
+                </div>
+            </div>
+
+            <div class="table-section">
+                <h3 style="margin-top:0; color:#003B72; font-size:1.1rem;">Add-on Scanner Backtracking</h3>
+
+                <?php if(!$addonRedeemLogsEnabled): ?>
+                    <div class="msg-box bg-error">Missing table: <code>addon_redemption_logs</code></div>
+                <?php else: ?>
+
+                    <?php if(count($scannerLogs) > 0): ?>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th width="10%">Booking</th>
+                                    <th width="20%">Add-on</th>
+                                    <th width="18%">Section</th>
+                                    <th width="18%">Scanned By</th>
+                                    <th width="14%">Qty Used</th>
+                                    <th width="20%">Date & Time</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach($scannerLogs as $log): ?>
+                                    <tr>
+                                        <td>
+                                            <span style="background:#e3f2fd; color:#0d47a1; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:0.85rem;">
+                                                #<?php echo str_pad((int)$log['booking_id'], 6, '0', STR_PAD_LEFT); ?>
+                                            </span>
+                                        </td>
+                                        <td style="font-weight:700;">
+                                            <?php echo htmlspecialchars($log['product_name'] ?: $log['product_id']); ?>
+                                            <div style="font-size:0.8rem; color:#777; margin-top:2px;">
+                                                Code: <?php echo htmlspecialchars($log['unique_code']); ?>
+                                            </div>
+                                        </td>
+                                        <td style="font-weight:600; color:#555;"><?php echo htmlspecialchars($log['scanner_section'] ?: 'Unknown'); ?></td>
+                                        <td style="font-weight:800; color:#003B72;"><?php echo htmlspecialchars($log['redeemed_by'] ?: 'Unknown'); ?></td>
+                                        <td style="font-weight:800; color:#155724;">
+                                            <?php echo (int)$log['quantity_used_after']; ?>
+                                            <div style="font-size:0.8rem; color:#777;">Rem: <?php echo (int)$log['remaining_after']; ?></div>
+                                        </td>
+                                        <td><?php echo date("M d, Y h:i A", strtotime($log['redeemed_at'])); ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    <?php else: ?>
+                        <div style="text-align:center; padding: 40px; color:#999;">No scanner logs found for this range.</div>
+                    <?php endif; ?>
+
+                <?php endif; ?>
+            </div>
+
+            <div class="table-section">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px;">
+                    <div>
+                        <h3 style="margin:0; color:#003B72; font-size:1.1rem;">Entry Ticket Scanner Backtracking</h3>
+                        <div style="font-size:0.85rem; color:#666; margin-top:4px;">Adult / Children scanned entry tickets</div>
+                    </div>
+
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <span style="background:#e8f5e9; color:#1b5e20; padding:6px 10px; border-radius:999px; font-size:0.82rem; font-weight:800;">
+                            Total: <?php echo (int)$entryTicketTotals['total']; ?>
+                        </span>
+                        <span style="background:#e3f2fd; color:#0d47a1; padding:6px 10px; border-radius:999px; font-size:0.82rem; font-weight:800;">
+                            Adults: <?php echo (int)$entryTicketTotals['adult']; ?>
+                        </span>
+                        <span style="background:#fff3cd; color:#856404; padding:6px 10px; border-radius:999px; font-size:0.82rem; font-weight:800;">
+                            Children: <?php echo (int)$entryTicketTotals['children']; ?>
+                        </span>
+                    </div>
+                </div>
+
+              <?php if(count($entryTicketScannerLogs) > 0): ?>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th width="10%">Booking</th>
+                                <th width="18%">Guest</th>
+                                <th width="14%">Ticket Code</th>
+                                <th width="10%">Type</th>
+                                <th width="24%">Entry (In)</th>
+                                <th width="24%">Exit (Out)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach($entryTicketScannerLogs as $entryLog): ?>
+                                <tr>
+                                    <td>
+                                        <span style="background:#e3f2fd; color:#0d47a1; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:0.85rem;">
+                                            #<?php echo str_pad((int)$entryLog['booking_id'], 6, '0', STR_PAD_LEFT); ?>
+                                        </span>
+                                    </td>
+                                    <td style="font-weight:700; color:#003B72;">
+                                        <?php echo htmlspecialchars($entryLog['customer_name'] ?: 'Unknown'); ?>
+                                        <div style="font-size:0.8rem; color:#777; margin-top:2px;">
+                                            <?php echo htmlspecialchars($entryLog['customer_phone'] ?: $entryLog['customer_email'] ?: '-'); ?>
+                                        </div>
+                                    </td>
+                                    <td style="font-family:monospace; font-size:0.9rem; font-weight:700; color:#444;">
+                                        <?php echo htmlspecialchars($entryLog['ticket_code']); ?>
+                                    </td>
+                                    <td style="font-weight:800; color:#155724;"><?php echo htmlspecialchars($entryLog['ticket_type']); ?></td>
+                                    <td style="font-size:0.85rem;">
+                                        <div style="font-weight:bold; color:#28a745;">
+                                            <i class="fas fa-sign-in-alt"></i> <?php echo !empty($entryLog['used_at']) ? date('M d, Y h:i A', strtotime($entryLog['used_at'])) : '-'; ?>
+                                        </div>
+                                        <div style="color:#666; margin-top:3px;">
+                                            By: <?php echo htmlspecialchars(trim((string)($entryLog['scanned_by'] ?? '')) ?: 'System / Unknown'); ?>
+                                        </div>
+                                    </td>
+                                    <td style="font-size:0.85rem;">
+                                        <?php if(!empty($entryLog['exited_at'])): ?>
+                                            <div style="font-weight:bold; color:#dc3545;">
+                                                <i class="fas fa-sign-out-alt"></i> <?php echo date('M d, Y h:i A', strtotime($entryLog['exited_at'])); ?>
+                                            </div>
+                                            <div style="color:#666; margin-top:3px;">
+                                                By: <?php echo htmlspecialchars(trim((string)($entryLog['exited_by'] ?? '')) ?: 'System / Unknown'); ?>
+                                            </div>
+                                        <?php else: ?>
+                                            <span style="background:#fff3cd; color:#856404; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:0.8rem;">
+                                                Still Inside
+                                            </span>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php else: ?>
+                    <div style="text-align:center; padding: 40px; color:#999;">No scanned Adult / Children entry tickets found for this booking date range.</div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+    </div>
+
+    <?php if($show_addon_history_modal): ?>
+    <div class="modal-overlay">
+        <div class="modal-box">
+            <a href="?view=sales" class="modal-close">&times;</a>
+            <h3 style="margin-top:0; color:#003B72;"><i class="fas fa-cart-plus"></i> Add-on Purchase History</h3>
+            <?php if($addon_history_booking): ?>
+                <p style="color:#666; margin-bottom:12px; line-height:1.5;">
+                    Booking: <strong>#<?php echo str_pad((int)$addon_history_booking['booking_id'], 6, '0', STR_PAD_LEFT); ?></strong><br>
+                    Customer: <strong><?php echo htmlspecialchars($addon_history_booking['customer_name']); ?></strong><br>
+                    Main Paid: <strong><?php echo date("M d, Y h:i A", strtotime($addon_history_booking['created_at'])); ?></strong>
+                </p>
+            <?php endif; ?>
+            <?php if(!$addonLogsEnabled): ?>
+                <div class="msg-box bg-error">Add-on logging table not found.</div>
+            <?php else: ?>
+                <div class="history-count" style="background:#ff7a00; color: white; padding: 15px; border-radius: 8px; text-align: center; margin-bottom: 15px;">
+                    <strong style="font-size: 1.8rem; display: block;"><?php echo count($addon_history_logs); ?></strong>
+                    Top-up Purchases Logged
+                </div>
+                <h4 style="margin-bottom:10px; font-size:0.9rem; color:#555;">Timeline:</h4>
+                <ul class="history-list">
+                    <li class="history-item">
+                        <span>
+                            <strong>Main Booking</strong> <span class="chip">BASE</span><br>
+                            <span style="color:#666; font-size:0.85rem;">Original purchase</span>
+                        </span>
+                        <span style="color:#888;"><?php echo $addon_history_booking ? date("h:i A", strtotime($addon_history_booking['created_at'])) : '-'; ?></span>
+                    </li>
+                    <?php if(count($addon_history_logs) > 0): ?>
+                        <?php foreach($addon_history_logs as $log): ?>
+                            <li class="history-item">
+                                <span>
+                                    <strong>Top-up Add-ons</strong> <span class="chip">TOPUP</span><br>
+                                    <?php if(!empty($log['items_summary'])): ?><span style="color:#666; font-size:0.85rem;"><?php echo htmlspecialchars($log['items_summary']); ?></span><br><?php endif; ?>
+                                    <span style="font-size:0.85rem; color:#333;">Amount: <strong>AED <?php echo number_format((float)$log['total_amount'], 2); ?></strong></span>
+                                </span>
+                                <span style="color:#888;">
+                                    <?php echo date("M d, Y", strtotime($log['created_at'])); ?><br><?php echo date("h:i A", strtotime($log['created_at'])); ?>
+                                </span>
+                            </li>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <li class="history-item" style="justify-content:center; color:#999;">No top-up add-on purchases found.</li>
+                    <?php endif; ?>
+                </ul>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
+
+<?php if($show_txn_details_modal): ?>
+    <div class="modal-overlay">
+        <div class="modal-box" style="max-width:860px;">
+            <a href="<?php echo htmlspecialchars($txn_close_url); ?>" class="modal-close">&times;</a>
+            <?php if(!$txn_booking): ?>
+                <div class="msg-box bg-error">Booking not found or unable to load details.</div>
+            <?php else: ?>
+                <?php
+                    $padId = str_pad((int)$txn_booking['booking_id'], 6, '0', STR_PAD_LEFT);
+                    $custName  = $txn_booking['customer_name'] ?? '-';
+                    $custEmail = $txn_booking['customer_email'] ?? '-';
+                    $custPhone = $txn_booking['customer_phone'] ?? '-';
+                    $pStatus   = $txn_booking['payment_status'] ?? '-';
+                    $pMethod   = $txn_booking['payment_method'] ?? '-';
+                    $totalAmt  = $txn_booking['total_amount'] ?? ($txn_booking['total'] ?? '-');
+                    $vatAmt    = $txn_booking['vat_amount'] ?? 0;
+                    $createdAt = $txn_booking['created_at'] ?? '-';
+                    $visitDate = $txn_booking['visit_date'] ?? '-';
+                    $expiry    = $txn_booking['expiry_date'] ?? null;
+                    
+                    $isRedeemed = !empty($txn_booking['is_redeemed']);
+                    $redeemedBy = $txn_booking['redeemed_by'] ?? '-';
+                    $redeemedAt = $txn_booking['redeemed_at'] ?? '-';
+                    
+                    if (!$isRedeemed && !empty($txn_ticket_instances)) {
+                        foreach ($txn_ticket_instances as $ti) {
+                            if (!empty($ti['is_used'])) {
+                                $isRedeemed = true;
+                                if ($redeemedBy == '-' || $redeemedBy == '') $redeemedBy = 'System';
+                                if ($redeemedAt == '-' || $redeemedAt == '') $redeemedAt = $ti['used_at'] ?? '-';
+                                break;
+                            }
+                        }
+                    }
+                    $facePath = $txn_booking['face_image_path'] ?? '';
+                ?>
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
+                    <h3 style="margin:0; color:#003B72; line-height:1.2;">
+                        <i class="fas fa-receipt"></i>
+                        Transaction Details — #<?php echo $padId; ?>
+                    </h3>
+                    <button onclick="window.open('print_receipt.php?booking_id=<?php echo $txn_booking['booking_id']; ?>', '_blank', 'width=400,height=600')" 
+                        style="background: #28a745; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; font-size: 0.95rem; cursor: pointer; font-weight: 900; transition: 0.3s; display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                        <i class="fas fa-print"></i> PRINT RECEIPT
+                    </button>
+                </div>
+
+                <?php if(isset($_GET['msg_claim'])): ?>
+                    <?php if($_GET['msg_claim'] == 'success'): ?><div class="msg-box bg-success" style="margin-top:10px; padding: 10px; font-size: 0.9rem;"><i class="fas fa-check-circle"></i> Booking and all tickets manually marked as Claimed!</div>
+                    <?php else: ?><div class="msg-box bg-error" style="margin-top:10px; padding: 10px; font-size: 0.9rem;"><i class="fas fa-exclamation-circle"></i> Failed to update database. Please try again.</div><?php endif; ?>
+                <?php endif; ?>
+
+                <div class="modal-grid-2" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px; margin-top:12px;">
+                    <div style="background:#f8f9fa; border:1px solid #eee; border-radius:12px; padding:15px;">
+                        <h4 style="margin:0 0 10px 0; color:#003B72;">Customer</h4>
+                        <div style="display:flex; gap:12px; align-items:center;">
+                            <div>
+                                <?php if(!empty($facePath)): ?>
+                                    <img src="uploads/faces/<?php echo htmlspecialchars($facePath); ?>" style="width:58px; height:58px; border-radius:50%; object-fit:cover; border:2px solid #28a745;">
+                                <?php else: ?>
+                                    <div style="width:58px; height:58px; border-radius:50%; background:#eee; display:flex; align-items:center; justify-content:center; color:#bbb; font-size:1.8rem;"><i class="fas fa-user"></i></div>
+                                <?php endif; ?>
+                            </div>
+                            <div style="line-height:1.4; flex: 1;">
+                                <div style="font-weight:900; font-size:1.05rem;"><?php echo htmlspecialchars($custName); ?></div>
+                                <div style="color:#555; margin-bottom: 3px;"><i class="fas fa-envelope"></i> <?php echo htmlspecialchars($custEmail); ?></div>
+                                <div style="color:#666; font-size:0.92rem;"><i class="fas fa-phone"></i> <?php echo htmlspecialchars($custPhone); ?></div>
+                                <div style="margin-top: 12px;">
+                                    <form method="POST" action="" style="background: #f0f4f8; padding: 10px; border-radius: 8px; border: 1px solid #d0deea; display: flex; gap: 8px; align-items: center;">
+                                        <input type="hidden" name="resend_txn_receipt" value="1">
+                                        <input type="hidden" name="resend_booking_id" value="<?php echo $txn_booking['booking_id']; ?>">
+                                        <input type="email" name="target_email" value="<?php echo htmlspecialchars($custEmail); ?>" required style="flex:1; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem;" placeholder="Send to email...">
+                                        <button type="submit" style="background: #003B72; color: #fff; border: none; padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; cursor: pointer; font-weight: bold;">Resend</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                        <hr style="border:0; border-top:1px solid #e5e5e5; margin:12px 0;">
+                        <div style="font-size:0.92rem; color:#444; line-height:1.6;">
+                            <div><strong>Visit Date:</strong> <?php echo ($visitDate && $visitDate!=='-') ? date("M d, Y", strtotime($visitDate)) : '-'; ?></div>
+                            <?php if(!empty($expiry)): ?><div><strong>Expiry Date:</strong> <?php echo date("M d, Y", strtotime($expiry)); ?></div><?php endif; ?>
+                            <div><strong>Acquired:</strong> <?php echo ($createdAt && $createdAt!=='-') ? date("M d, Y h:i A", strtotime($createdAt)) : '-'; ?></div>
+                        </div>
+                    </div>
+                    
+                    <div style="background:#ffffff; border:1px solid #eee; border-radius:12px; padding:15px;">
+                        <h4 style="margin:0 0 10px 0; color:#003B72;">Payment / Status</h4>
+                        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; font-size:0.95rem;">
+                            <div><div style="color:#666; font-size:0.85rem;">Payment Status</div><div style="font-weight:900;"><?php echo htmlspecialchars(strtoupper($pStatus)); ?></div></div>
+                            <div><div style="color:#666; font-size:0.85rem;">Payment Method</div><div style="font-weight:900;"><?php echo (strtolower($pMethod) === 'qr_points') ? "QR Wallet Card" : htmlspecialchars(strtoupper($pMethod)); ?></div></div>
+                            <div style="grid-column:1/3; display:flex; justify-content:space-between; align-items:center;">
+                                <div><div style="color:#666; font-size:0.85rem;">VAT (5%) included</div><div style="font-weight:700; font-size:1rem; color:#856404;">AED <?php echo number_format((float)$vatAmt, 2); ?></div></div>
+                                <div style="text-align:right;"><div style="color:#666; font-size:0.85rem;">Grand Total</div><div style="font-weight:900; font-size:1.3rem; color:#155724;">AED <?php echo is_numeric($totalAmt) ? number_format((float)$totalAmt, 2) : htmlspecialchars($totalAmt); ?></div></div>
+                            </div>
+                        </div>
+                        <hr style="border:0; border-top:1px solid #e5e5e5; margin:12px 0;">
+                        <div style="font-size:0.95rem;">
+                            <strong>Redeemed:</strong>
+                            <?php if($isRedeemed): ?>
+                                <span class="badge bg-active">YES</span>
+                                <div style="margin-top:6px; color:#555;"><div><strong>By:</strong> <?php echo htmlspecialchars($redeemedBy); ?></div><div><strong>At:</strong> <?php echo ($redeemedAt && $redeemedAt!=='-') ? date("M d, Y h:i A", strtotime($redeemedAt)) : '-'; ?></div></div>
+                            <?php else: ?>
+                                <span class="badge bg-expired" style="margin-bottom: 5px; display: inline-block;">NO</span>
+                                <?php if(strtolower($pStatus) === 'paid'): ?>
+                                    <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed #ccc;">
+                                        <form method="POST" action="">
+                                            <input type="hidden" name="manual_mark_claimed" value="1">
+                                            <input type="hidden" name="claim_booking_id" value="<?php echo $txn_booking['booking_id']; ?>">
+                                            <div style="margin-bottom: 8px;">
+                                                <label style="font-size: 0.8rem; color: #555; font-weight: bold;">Override Reason:</label>
+                                                <input type="text" name="override_reason" required placeholder="e.g. Scanner Broken, Unreadable QR..." style="width: 100%; padding: 6px; font-size: 0.85rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; margin-top: 3px;">
+                                            </div>
+                                            <button type="submit" onclick="return confirm('Are you sure you want to manually mark this booking and ALL its tickets as CLAIMED?');" style="background: #28a745; color: #fff; border: none; padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; cursor: pointer; font-weight: bold; width: 100%; transition: 0.3s;"><i class="fas fa-check-double"></i> Force Mark as Claimed</button>
+                                        </form>
+                                    </div>
+                                <?php else: ?>
+                                    <div style="margin-top: 6px; font-size: 0.8rem; color: #dc3545;">* Cannot claim. Payment is not settled.</div>
+                                <?php endif; ?>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top:15px; background:#f8faff; border:1px solid #d0deea; border-radius:12px; padding:15px;">
+                    <h4 style="margin:0 0 10px 0; color:#003B72;"><i class="fas fa-file-signature"></i> Customer Agreements</h4>
+                    <div style="display:flex; flex-direction:column; gap:10px; font-size:0.95rem;">
+                        <div style="display:flex; align-items:flex-start; gap:10px;">
+                            <?php if(!empty($txn_booking['agreed_terms'])): ?><i class="fas fa-check-circle" style="color:#28a745; font-size:1.2rem; margin-top:2px;"></i><span style="color:#333; line-height:1.4;"><strong>Agreed</strong> to Terms, Conditions, Privacy Policy, and Safety Rules.</span>
+                            <?php else: ?><i class="fas fa-times-circle" style="color:#dc3545; font-size:1.2rem; margin-top:2px;"></i><span style="color:#999; line-height:1.4;">No record (Old Booking / Walk-in)</span><?php endif; ?>
+                        </div>
+                        <div style="display:flex; align-items:flex-start; gap:10px;">
+                            <?php if(!empty($txn_booking['agreed_refund_policy'])): ?><i class="fas fa-check-circle" style="color:#28a745; font-size:1.2rem; margin-top:2px;"></i><span style="color:#333; line-height:1.4;"><strong>Acknowledged</strong> the Strict No-Refund Policy.</span>
+                            <?php else: ?><i class="fas fa-times-circle" style="color:#dc3545; font-size:1.2rem; margin-top:2px;"></i><span style="color:#999; line-height:1.4;">No record (Old Booking / Walk-in)</span><?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top:15px; background:white; border:1px solid #eee; border-radius:12px; padding:15px;">
+                    <h4 style="margin:0 0 10px 0; color:#003B72;"><i class="fas fa-box"></i> Items Purchased</h4>
+                    <?php if(count($txn_items) > 0): ?>
+                        <div style="overflow-x:auto;">
+                            <table style="margin:0; width:100%;">
+                                <thead><tr><th>Item</th><th width="12%">Qty</th><th width="18%">Price</th><th width="18%">Subtotal</th></tr></thead>
+                                <tbody>
+                                    <?php $sum=0; foreach($txn_items as $it): $sum += (float)$it['subtotal']; ?>
+                                        <tr>
+                                            <td style="font-weight:700;"><?php echo htmlspecialchars($it['name']); ?><div style="color:#999; font-size:0.8rem;">ID: <?php echo htmlspecialchars($it['product_id']); ?></div></td>
+                                            <td><?php echo (int)$it['quantity']; ?></td>
+                                            <td>AED <?php echo number_format((float)$it['price'], 2); ?></td>
+                                            <td style="font-weight:900;">AED <?php echo number_format((float)$it['subtotal'], 2); ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                    <tr><td colspan="3" style="text-align:right; font-weight:900;">Total (Items)</td><td style="font-weight:900;">AED <?php echo number_format((float)$sum, 2); ?></td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php else: ?>
+                        <div style="color:#999; font-style:italic;">No booking_items found.</div>
+                    <?php endif; ?>
+                </div>
+
+                <?php if(!empty($txn_ticket_instances)): ?>
+                <div style="margin-top:15px; background:white; border:1px solid #eee; border-radius:12px; padding:15px;">
+                    <h4 style="margin:0 0 10px 0; color:#003B72;"><i class="fas fa-qrcode"></i> Ticket Instances / Codes</h4>
+                    <div style="max-height:260px; overflow:auto; border:1px solid #f0f0f0; border-radius:10px;">
+                        <table style="margin:0; width:100%;">
+                            <thead><tr><th>Code</th><th>Type</th><th>Status</th><th>Used At</th></tr></thead>
+                            <tbody>
+                            <?php foreach($txn_ticket_instances as $ti): ?>
+                                <tr>
+                                    <td style="font-weight:900;"><?php echo htmlspecialchars($ti['ticket_code'] ?? '-'); ?></td>
+                                    <td><?php echo htmlspecialchars($ti['ticket_type'] ?? '-'); ?></td>
+                                    <td><?php echo !empty($ti['is_used']) ? '<span class="badge bg-active">USED</span>' : '<span class="badge bg-expired">UNUSED</span>'; ?></td>
+                                    <td><?php echo (!empty($ti['used_at'])) ? date("M d, Y h:i A", strtotime($ti['used_at'])) : '-'; ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <?php if(!empty($txn_addon_topups)): ?>
+                <div style="margin-top:15px; background:white; border:1px solid #eee; border-radius:12px; padding:15px;">
+                    <h4 style="margin:0 0 10px 0; color:#003B72;"><i class="fas fa-cart-plus"></i> Add-on/QR Wallet Purchases</h4>
+                    <div style="max-height:260px; overflow:auto; border:1px solid #f0f0f0; border-radius:10px;">
+                        <table style="margin:0; width:100%;">
+                            <thead><tr><th>Action</th><th>Items</th><th>Amount</th><th>Method</th><th>By</th><th>Time</th></tr></thead>
+                            <tbody>
+                                <?php foreach($txn_addon_topups as $tp): ?>
+                                <tr>
+                                    <td style="font-weight:900;"><?php $actionValue = strtoupper($tp['action'] ?? ''); echo ($actionValue === 'TOPUP') ? 'Purchase' : htmlspecialchars($actionValue); ?></td>
+                                    <td style="color:#555;"><?php echo htmlspecialchars($tp['items_summary'] ?? '-'); ?></td>
+                                    <td style="font-weight:900;">AED <?php echo number_format((float)($tp['total_amount'] ?? 0), 2); ?></td>
+                                    <td style="font-weight: bold;">
+                                        <?php 
+                                            $pM = strtolower($tp['payment_method'] ?? '');
+                                            if ($pM === 'qr_points' || $pM === 'qr_wallet') echo '<span style="color:#0ea5e9;"><i class="fas fa-wallet"></i> QR WALLET</span>';
+                                            elseif ($pM === 'cash') echo '<span style="color:#28a745;"><i class="fas fa-money-bill-wave"></i> CASH/CARD</span>';
+                                            elseif ($pM === 'card' || $pM === 'credit card') echo '<span style="color:#f39c12;"><i class="fas fa-credit-card"></i> CARD</span>';
+                                            else echo strtoupper(htmlspecialchars($pM));
+                                        ?>
+                                    </td>
+                                    <td><?php echo htmlspecialchars($tp['created_by'] ?? '-'); ?></td>
+                                    <td><?php echo !empty($tp['created_at']) ? date("M d, Y h:i A", strtotime($tp['created_at'])) : '-'; ?></td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <div style="margin-top:15px;">
+                    <details style="background:#fff; border:1px dashed #ddd; border-radius:12px; padding:12px;">
+                        <summary style="cursor:pointer; font-weight:900; color:#003B72;">Full Details</summary>
+                        <div style="margin-top:12px; max-height:260px; overflow:auto; border:1px solid #f0f0f0; border-radius:10px;">
+                            <table style="margin:0; width:100%;">
+                                <thead><tr><th>Column</th><th>Value</th></tr></thead>
+                                <tbody>
+                                    <?php foreach($txn_booking as $k => $v): ?>
+                                        <tr><td style="font-weight:900;"><?php echo htmlspecialchars($k); ?></td><td style="color:#555;"><?php echo htmlspecialchars(is_scalar($v) ? (string)$v : json_encode($v)); ?></td></tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </details>
+                </div>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <div class="modal-overlay" id="rescheduleModal" style="display:none;">
+        <div class="modal-box">
+            <a href="#" class="modal-close" onclick="closeRescheduleModal(); return false;">&times;</a>
+            <h3 style="margin-top:0; color:#003B72;"><i class="fas fa-calendar-check"></i> Reschedule Booking</h3>
+            <p style="color:#666; font-size:0.9rem; margin-bottom:20px;">This will update the database and instantly email the customer their new tickets.</p>
+            <form method="POST" action="reception_dashboard.php?view=reschedule">
+                <input type="hidden" name="reschedule_booking" value="1">
+                <input type="hidden" name="r_booking_id" id="r_booking_id">
+                <div class="form-control" style="margin-bottom:15px;">
+                    <label>Current Visit Date</label>
+                    <input type="text" id="r_current_date" disabled style="background:#f8f9fa; cursor:not-allowed; border:1px solid #ddd;">
+                </div>
+                <div class="form-control" style="margin-bottom:20px;">
+                    <label>New Visit Date</label>
+                    <input type="date" name="new_visit_date" min="<?php echo date('Y-m-d'); ?>" required style="border:2px solid #003B72;">
+                </div>
+                <button type="submit" class="btn-filter" style="width:100%; background:#28a745; color:#fff; font-size:1.1rem; padding:14px;"><i class="fas fa-paper-plane"></i> Confirm & Send Email</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="qrHistoryModal" style="display:none; z-index: 10005;">
+        <div class="modal-box" style="max-width: 800px;">
+            <a href="javascript:void(0);" class="modal-close" onclick="closeWalletHistory();">&times;</a>
+            <h3 style="margin-top:0; color:#003B72;"><i class="fas fa-history"></i> Wallet Transaction History</h3>
+            <p style="color:#666; font-size:0.95rem; margin-bottom:15px;">
+                Customer: <strong id="history_cust_name" style="color:#333;">...</strong>
+            </p>
+            
+            <div id="qr_history_body" style="max-height: 400px; overflow-y: auto; border: 1px solid #eee; border-radius: 8px;">
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="cashPaymentModal" style="display:none; z-index: 10006;">
+        <div class="modal-box" style="max-width: 400px; text-align: center;">
+            <a href="javascript:void(0);" class="modal-close" onclick="closeCashModal();">&times;</a>
+            <h3 style="margin-top:0; color:#28a745;"><i class="fas fa-money-bill-wave"></i> Receive Payment</h3>
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #eee;">
+                <div style="font-size: 0.9rem; color: #666;">Total Amount to Pay:</div>
+                <div style="font-size: 1.8rem; font-weight: 900; color: #003B72;">AED <span id="display_total_amount">0.00</span></div>
+            </div>
+            
+           <div style="text-align: left; margin-bottom: 12px;">
+    <label style="font-weight: bold; font-size: 0.9rem; color: #155724;"><i class="fas fa-money-bill-wave"></i> Input Cash Amount (AED):</label>
+    <input type="number" id="cash_received" step="0.01" placeholder="0.00" style="width: 100%; padding: 12px; font-size: 1.2rem; border: 2px solid #28a745; border-radius: 8px; margin-top: 5px; font-weight: bold; box-sizing: border-box;" oninput="calculateChange('cash')">
+</div>
+
+<div style="text-align: left; margin-bottom: 15px;">
+    <label style="font-weight: bold; font-size: 0.9rem; color: #003B72;"><i class="fas fa-credit-card"></i> Input Card Amount (AED):</label>
+    <input type="number" id="card_received" step="0.01" placeholder="0.00" style="width: 100%; padding: 12px; font-size: 1.2rem; border: 2px solid #003B72; border-radius: 8px; margin-top: 5px; font-weight: bold; box-sizing: border-box;" oninput="calculateChange('card')">
+</div>
+
+            <div style="background: #e8f5e9; padding: 15px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #c8e6c9;">
+                <div style="font-size: 0.9rem; color: #2e7d32;">Change:</div>
+                <div style="font-size: 1.8rem; font-weight: 900; color: #1b5e20;">AED <span id="display_change">0.00</span></div>
+            </div>
+            <form id="cashPaymentForm">
+                <input type="hidden" name="booking_id" id="cash_booking_id">
+                <button type="submit" id="confirmCashBtn" disabled style="width: 100%; padding: 15px; background: #28a745; color: white; border: none; border-radius: 8px; font-size: 1.1rem; font-weight: bold; cursor: pointer; transition: 0.3s; opacity: 0.5;">CONFIRM PAYMENT</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="paymentSuccessModal" style="display:none; z-index: 10007;">
+        <div class="modal-box" style="max-width: 450px; text-align: center; border-top: 8px solid #28a745;">
+            <h2 style="color: #28a745; margin-bottom: 10px;"><i class="fas fa-check-circle"></i> Payment Successful!</h2>
+            <p style="font-size: 1.1rem; color: #555;">Payment for Booking <strong id="success_booking_id_display">#000000</strong> has been processed.</p>
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; margin: 20px 0; border: 1px dashed #28a745;">
+                <div style="font-size: 0.9rem; color: #666;">Change given:</div>
+                <div style="font-size: 1.5rem; font-weight: 900; color: #1b5e20;">AED <span id="success_change_display">0.00</span></div>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr; gap: 10px;">
+                <button onclick="printReceiptFromModal()" style="padding: 15px; background: #003B72; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 1rem;"><i class="fas fa-print"></i> PRINT RECEIPT</button>
+                <button onclick="resendEmailFromModal()" style="padding: 12px; background: #17a2b8; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer;"><i class="fas fa-envelope"></i> SEND/RESEND EMAIL</button>
+                <button onclick="clearModalState(); location.reload();" style="padding: 12px; background: #6c757d; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px;">DONE / CLOSE</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function switchTab(tabName) {
+            const url = new URL(window.location);
+            url.searchParams.set('view', tabName);
+            url.searchParams.delete('booking_details_id');
+            url.searchParams.delete('addon_history_id');
+            url.searchParams.delete('msg');
+            url.searchParams.delete('error');
+            url.searchParams.delete('s_start');
+            url.searchParams.delete('s_end');
+            url.searchParams.delete('scanner_pid');
+            window.location.href = url.toString();
+        }
+
+        // RESCHEDULE LOGIC
+        function openRescheduleModal(bookingId, currentDate) {
+            document.getElementById('r_booking_id').value = bookingId;
+            document.getElementById('r_current_date').value = currentDate;
+            document.getElementById('rescheduleModal').style.display = 'flex';
+            saveModalState('reschedule', { bookingId: bookingId, currentDate: currentDate });
+        }
+        function closeRescheduleModal() {
+            document.getElementById('rescheduleModal').style.display = 'none';
+            clearModalState();
+        }
+
+        // QR WALLET FUNCTIONS
+        function openWalletHistory(walletId, custName) {
+            document.getElementById('history_cust_name').innerText = custName;
+            const bodyDiv = document.getElementById('qr_history_body');
+            bodyDiv.innerHTML = '<div style="text-align:center; padding:30px; color:#666;"><i class="fas fa-spinner fa-spin fa-2x"></i><br><br>Loading history...</div>';
+            
+            document.getElementById('qrHistoryModal').style.display = 'flex';
+            saveModalState('qrHistory', { walletId: walletId, custName: custName });
+
+            fetch('reception_dashboard.php?ajax_action=get_qr_history&wallet_id=' + walletId)
+                .then(response => response.text())
+                .then(html => {
+                    bodyDiv.innerHTML = html;
+                })
+                .catch(error => {
+                    bodyDiv.innerHTML = '<div style="color:red; text-align:center; padding: 20px;">Failed to load history.</div>';
+                });
+        }
+
+        function closeWalletHistory() {
+            document.getElementById('qrHistoryModal').style.display = 'none';
+            clearModalState();
+        }
+
+        function printQRCard(qrCode, custName, walletId) {
+            const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent(qrCode);
+            const printWindow = window.open('', '_blank', 'width=600,height=400');
+            printWindow.document.write(`
+                <html>
+                <head>
+                    <title>Print QR Card - ${custName}</title>
+                    <style>
+                        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #fff; }
+                        .id-card { width: 85.6mm; height: 53.98mm; border: 1px solid #ccc; border-radius: 8px; background: linear-gradient(135deg, #ffffff, #e0f2fe); padding: 4mm; box-sizing: border-box; position: relative; display: flex; flex-direction: row; align-items: center; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                        .card-left { flex: 1.2; text-align: center; }
+                        .card-right { flex: 1; text-align: center; border-left: 2px dashed #0ea5e9; padding-left: 3mm; }
+                        .card-logo { width: 35mm; height: auto; margin-bottom: 2mm; }
+                        .card-title { color: #0ea5e9; font-size: 10px; font-weight: 900; letter-spacing: 1px; margin: 0 0 3mm 0; text-transform: uppercase; }
+                        .cust-name { font-size: 13px; font-weight: bold; color: #003B72; margin: 0; text-transform: uppercase; line-height: 1.1; }
+                        .wallet-id { font-size: 9px; color: #666; margin-top: 1mm; font-weight: bold; }
+                        .qr-img { width: 30mm; height: 30mm; object-fit: contain; }
+                        .scan-text { font-size: 8px; color: #003B72; margin-top: 1mm; font-weight: bold; }
+                        @media print {
+                            @page { size: 85.6mm 53.98mm; margin: 0; }
+                            body { -webkit-print-color-adjust: exact; print-color-adjust: exact; background: transparent; }
+                            .id-card { border: none; }
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="id-card">
+                        <div class="card-left">
+                            <img src="../Images/awpemaillogo.png" alt="Logo" class="card-logo" onerror="this.style.display='none'">
+                            <h3 class="card-title">QR Wallet Card</h3>
+                            <p class="cust-name">${custName}</p>
+                            <p class="wallet-id">ID: W-${walletId}</p>
+                        </div>
+                        <div class="card-right">
+                            <img src="${qrUrl}" class="qr-img" alt="QR Code">
+                            <div class="scan-text">SCAN TO PAY</div>
+                        </div>
+                    </div>
+                    <script>setTimeout(() => { window.print(); }, 800);<\/script>
+                </body>
+                </html>
+            `);
+            printWindow.document.close();
+        }
+
+        function downloadQRCard(qrCode, custName, walletId) {
+            const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent(qrCode);
+            const container = document.createElement('div');
+            container.style.position = 'absolute'; container.style.left = '-9999px'; container.style.top = '-9999px';
+            container.innerHTML = `
+                <div id="temp-id-card" style="width: 324px; height: 204px; border: 1px solid #ccc; border-radius: 8px; background: linear-gradient(135deg, #ffffff, #e0f2fe); padding: 15px; box-sizing: border-box; display: flex; flex-direction: row; align-items: center; font-family: 'Segoe UI', Tahoma, sans-serif;">
+                    <div style="flex: 1.2; text-align: center;">
+                        <img src="Images/awpemaillogo.png" style="width: 120px; height: auto; margin-bottom: 8px;" onerror="this.style.display='none'">
+                        <h3 style="color: #0ea5e9; font-size: 12px; font-weight: 900; letter-spacing: 1px; margin: 0 0 10px 0; text-transform: uppercase;">QR Wallet Card</h3>
+                        <p style="font-size: 16px; font-weight: bold; color: #003B72; margin: 0; text-transform: uppercase; line-height: 1.1;">${custName}</p>
+                        <p style="font-size: 11px; color: #666; margin-top: 5px; font-weight: bold;">ID: W-${walletId}</p>
+                    </div>
+                    <div style="flex: 1; text-align: center; border-left: 2px dashed #0ea5e9; padding-left: 10px;">
+                        <img src="${qrUrl}" crossorigin="anonymous" style="width: 100px; height: 100px; object-fit: contain;">
+                        <div style="font-size: 10px; color: #003B72; margin-top: 5px; font-weight: bold;">SCAN TO PAY</div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(container);
+            setTimeout(() => {
+                html2canvas(document.getElementById('temp-id-card'), { useCORS: true, scale: 2, backgroundColor: null }).then(canvas => {
+                    const link = document.createElement('a');
+                    link.download = `QR_Wallet_${custName.replace(/\s+/g, '_')}.png`;
+                    link.href = canvas.toDataURL('image/png'); link.click();
+                    document.body.removeChild(container);
+                });
+            }, 600);
+        }
+
+        // BALANCED MIXED PAYMENT LOGIC
+        let currentTotal = 0;
+        let globalBookingId = 0;
+        let globalChange = 0;
+
+function openCashModal(bookingId, totalAmount) {
+            currentTotal = parseFloat(totalAmount);
+            document.getElementById('cash_booking_id').value = bookingId;
+            document.getElementById('display_total_amount').innerText = currentTotal.toLocaleString(undefined, {minimumFractionDigits: 2});
+            
+            // AUTOMATIC NA ILALAGAY ANG TOTAL AMOUNT SA CARD
+            document.getElementById('card_received').value = currentTotal.toFixed(2);
+            document.getElementById('cash_received').value = ''; 
+            
+            // I-run agad ang calculation para ma-enable ang Confirm button 
+            // kung sakaling pure card ang bayad at wala siyang itatype sa cash
+            calculateChange('card');
+            
+            document.getElementById('cashPaymentModal').style.display = 'flex';
+            saveModalState('cashPayment', { bookingId: bookingId, totalAmount: totalAmount });
+            
+            // Naka-focus agad sa cash input para pag-type niya, automatic mag-a-adjust ang card
+            setTimeout(() => document.getElementById('cash_received').focus(), 300);
+        }
+
+        function closeCashModal() {
+            document.getElementById('cashPaymentModal').style.display = 'none';
+            clearModalState();
+        }
+
+      function calculateChange(source) {
+    const cashInput = document.getElementById('cash_received');
+    const cardInput = document.getElementById('card_received');
+
+    let cash = parseFloat(cashInput.value) || 0;
+    let card = parseFloat(cardInput.value) || 0;
+
+    // AUTO-FILL LOGIC: Kung alin ang tinype-an, i-a-adjust ang kabila.
+    if (source === 'cash') {
+        if (cash < currentTotal && cashInput.value !== '') {
+            // Kung kulang ang cash, auto-fill ang card
+            card = currentTotal - cash;
+            cardInput.value = card.toFixed(2);
+        } else if (cash >= currentTotal) {
+            // Kung sapat o sobra na ang cash, i-zero out ang card para may sukli (Change)
+            card = 0;
+            cardInput.value = ''; 
+        }
+    } else if (source === 'card') {
+        if (card < currentTotal && cardInput.value !== '') {
+            // Kung nag-type ka sa card at kulang, auto-fill ang cash
+            cash = currentTotal - card;
+            cashInput.value = cash.toFixed(2);
+        } else if (card >= currentTotal) {
+            // Kung sapat na ang card, i-zero out ang cash
+            cash = 0;
+            cashInput.value = ''; 
+        }
+    }
+
+    // RE-CALCULATE matapos ang auto-fill
+    cash = parseFloat(cashInput.value) || 0;
+    card = parseFloat(cardInput.value) || 0;
+    
+    let totalReceived = cash + card;
+    // Gumamit ng Math.round para iwasan ang Javascript floating point bug (ex: 0.00000000001)
+    let change = Math.round((totalReceived - currentTotal) * 100) / 100;
+    
+    const btn = document.getElementById('confirmCashBtn');
+
+    if (change >= 0) {
+        globalChange = change;
+        document.getElementById('display_change').innerText = change.toLocaleString(undefined, {minimumFractionDigits: 2});
+        btn.disabled = false;
+        btn.style.opacity = '1';
+    } else {
+        btn.disabled = true;
+        btn.style.opacity = '0.5';
+        document.getElementById('display_change').innerText = '0.00';
+    }
+}
+
+  document.getElementById('cashPaymentForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const cashAmountPaid = parseFloat(document.getElementById('cash_received').value) || 0;
+            const cardAmountPaid = parseFloat(document.getElementById('card_received').value) || 0;
+
+            // Gumawa ng text summary para ipakita sa cashier bago mag-confirm
+            let paymentSummary = '';
+            if (cashAmountPaid > 0 && cardAmountPaid > 0) {
+                paymentSummary = `Cash: AED ${cashAmountPaid.toFixed(2)}<br>Card: AED ${cardAmountPaid.toFixed(2)}`;
+            } else if (cashAmountPaid > 0) {
+                paymentSummary = `Cash: AED ${cashAmountPaid.toFixed(2)}`;
+            } else {
+                paymentSummary = `Card: AED ${cardAmountPaid.toFixed(2)}`;
+            }
+
+            // Gamitin ang SweetAlert2 para sa Confirmation
+            Swal.fire({
+                title: 'Confirm Payment?',
+                html: `Are you sure you want to process this payment?<br><br><div style="background:#f8f9fa; padding:10px; border-radius:8px; display:inline-block; margin-top:10px;"><strong>${paymentSummary}</strong></div>`,
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#28a745',
+                cancelButtonColor: '#6c757d',
+                confirmButtonText: '<i class="fas fa-check"></i> Yes, Confirm Payment',
+                cancelButtonText: 'Cancel'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    // KUNG NAG-YES, DITO NA TATAKBO YUNG ORIGINAL PROCESS MO
+                    const bookingId = document.getElementById('cash_booking_id').value;
+                    globalBookingId = bookingId;
+                    const btn = document.getElementById('confirmCashBtn');
+                    
+                    btn.disabled = true;
+                    btn.innerHTML = 'PROCESSING... <i class="fas fa-spinner fa-spin"></i>';
+
+                    const adminName = "<?php echo addslashes($_SESSION['admin_fullname'] ?? $_SESSION['admin_username'] ?? 'Reception'); ?>";
+
+                    fetch('update_payment.php?ajax=1&booking_id=' + bookingId + '&processed_by=' + encodeURIComponent(adminName))
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.status === 'success') {
+                                fetch('reception_dashboard.php?ajax_action=update_payment_split&booking_id=' + bookingId + '&cash=' + cashAmountPaid + '&card=' + cardAmountPaid)
+                                    .then(() => {
+                                        closeCashModal();
+                                        document.getElementById('success_booking_id_display').innerText = '#' + bookingId.padStart(6, '0');
+                                        document.getElementById('success_change_display').innerText = globalChange.toLocaleString(undefined, {minimumFractionDigits: 2});
+                                        document.getElementById('paymentSuccessModal').style.display = 'flex';
+                                        saveModalState('paymentSuccess', { bookingId: bookingId, change: globalChange });
+                                    });
+                            } else {
+                                Swal.fire('Error', data.message, 'error');
+                                btn.disabled = false;
+                                btn.innerHTML = 'CONFIRM PAYMENT';
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error:', error);
+                            Swal.fire('Error', 'System Error. Please check connection.', 'error');
+                            btn.disabled = false;
+                            btn.innerHTML = 'CONFIRM PAYMENT';
+                        });
+                }
+            });
+        });
+
+        function printReceiptFromModal() {
+            if (!globalBookingId || globalBookingId == 0) {
+                // Kunin ang huling fallback id mula sa modal form element kung biglang nag-empty ang global script variable
+                const fallbackId = document.getElementById('cash_booking_id').value;
+                if(fallbackId) { globalBookingId = fallbackId; }
+            }
+            if (globalBookingId) {
+                window.open('print_receipt.php?booking_id=' + globalBookingId, '_blank', 'width=450,height=700,scrollbars=yes');
+            } else {
+                alert("Error: Cannot find Booking ID for printing.");
+            }
+        }
+
+        function resendEmailFromModal() {
+            window.location.href = 'reception_dashboard.php?view=sales&action=resend&booking_id=' + globalBookingId;
+        }
+
+        // =====================================================
+        // MODAL STATE PERSISTENCE (SessionStorage)
+        // Keeps JS modals open across auto-refresh
+        // =====================================================
+        const MODAL_STATE_KEY = 'reception_modal_state';
+
+        function saveModalState(modalName, data) {
+            try { sessionStorage.setItem(MODAL_STATE_KEY, JSON.stringify({ modal: modalName, data: data })); } catch(e) {}
+        }
+        function clearModalState() {
+            try { sessionStorage.removeItem(MODAL_STATE_KEY); } catch(e) {}
+        }
+        function restoreModalState() {
+            try {
+                const raw = sessionStorage.getItem(MODAL_STATE_KEY);
+                if (!raw) return;
+                const state = JSON.parse(raw);
+                if (state.modal === 'reschedule') {
+                    openRescheduleModal(state.data.bookingId, state.data.currentDate);
+                } else if (state.modal === 'qrHistory') {
+                    openWalletHistory(state.data.walletId, state.data.custName);
+                } else if (state.modal === 'cashPayment') {
+                    openCashModal(state.data.bookingId, state.data.totalAmount);
+                } else if (state.modal === 'paymentSuccess') {
+                    globalBookingId = state.data.bookingId;
+                    globalChange    = state.data.change;
+                    document.getElementById('success_booking_id_display').innerText = '#' + String(state.data.bookingId).padStart(6, '0');
+                    document.getElementById('success_change_display').innerText = parseFloat(state.data.change).toLocaleString(undefined, {minimumFractionDigits: 2});
+                    document.getElementById('paymentSuccessModal').style.display = 'flex';
+                }
+            } catch(e) {}
+        }
+        function isAnyModalOpen() {
+            // JS-controlled modals
+            const jsModalIds = ['rescheduleModal', 'qrHistoryModal', 'cashPaymentModal', 'paymentSuccessModal'];
+            for (const id of jsModalIds) {
+                const el = document.getElementById(id);
+                if (el && el.style.display !== 'none' && el.style.display !== '') return true;
+            }
+            // PHP-rendered modals (modal-overlay without an id = always in DOM when active)
+            const phpOverlays = document.querySelectorAll('.modal-overlay:not([id])');
+            for (const el of phpOverlays) {
+                if (window.getComputedStyle(el).display !== 'none') return true;
+            }
+            return false;
+        }
+
+        // Smart auto-refresh: waits until no modal is open and no input is focused
+        let _autoRefreshTimer = null;
+        function scheduleAutoRefresh(delay) {
+    if (_autoRefreshTimer) clearTimeout(_autoRefreshTimer);
+    _autoRefreshTimer = setTimeout(function doRefresh() {
+        // Huwag mag-refresh kung nasa POS tab — mababasag ang iframe modals
+        const params = new URLSearchParams(window.location.search);
+        const currentView = params.get('view') || 'walkin_pos';
+        if (currentView === 'walkin_pos') {
+            _autoRefreshTimer = setTimeout(doRefresh, 60000);
+            return;
+        }
+        if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') {
+            _autoRefreshTimer = setTimeout(doRefresh, 60000);
+            return;
+        }
+        if (isAnyModalOpen()) {
+            _autoRefreshTimer = setTimeout(doRefresh, 30000);
+            return;
+        }
+        window.location.reload();
+    }, delay || 60000);
+}
+scheduleAutoRefresh(60000);
+
+        // Restore any saved modal state when page fully loads
+        window.addEventListener('load', restoreModalState);
+        function confirmDecline(bookingId) {
+    // FALLBACK: kung hindi naka-load ang SweetAlert2 (slow CDN/blocked), gumamit ng native confirm
+    if (typeof Swal === 'undefined') {
+        if (confirm('Decline and void this transaction? This action cannot be undone.')) {
+            window.location.href = 'reception_dashboard.php?action=decline&booking_id=' + bookingId;
+        }
+        return;
+    }
+
+    Swal.fire({
+        title: 'Decline Transaction?',
+        text: "Are you sure you want to decline and void this transaction? This action cannot be undone.",
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#dc3545',
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: '<i class="fas fa-times"></i> Yes, decline it!',
+        cancelButtonText: 'Cancel',
+        reverseButtons: true
+    }).then((result) => {
+        if (result.isConfirmed) {
+            // Show loading habang nagre-redirect
+            Swal.fire({
+                title: 'Processing...',
+                text: 'Voiding transaction',
+                allowOutsideClick: false,
+                didOpen: () => { Swal.showLoading(); }
+            });
+            window.location.href = 'reception_dashboard.php?action=decline&booking_id=' + bookingId;
+        }
+    });
+}
+    </script>
+</body>
+</html>
