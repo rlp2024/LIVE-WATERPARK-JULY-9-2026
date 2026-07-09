@@ -1,0 +1,576 @@
+<?php
+session_start();
+include_once 'db_connect.php';
+include_once 'email_helper.php'; 
+
+// Set Timezone
+date_default_timezone_set('Asia/Dubai'); 
+
+// Security Check
+if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
+    header("Location: admin_login.php");
+    exit;
+}
+
+$message = "";
+$messageType = ""; 
+$booking = null;
+$scannedTicketCode = null; // New variable to track specific ticket
+$ticketStatus = ""; // valid or used
+$orderItems = [];
+$isAnnualPass = false;
+$autoStartFace = false; 
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    
+    // =========================================================
+    // A. SEARCH / SCAN LOGIC (UPDATED)
+    // =========================================================
+    if (isset($_POST['booking_id'])) {
+        $input = trim($_POST['booking_id']);
+
+        // 1. BLOCK ADD-ON QR CODES
+        if (preg_match('/^\d+\-ADD\d+$/i', $input)) {
+            $message = "ADD-ON QR DETECTED. NOT VALID IN GATE SCANNER.";
+            $messageType = "error";
+        } else {
+            
+            // 2. CHECK IF INPUT IS A SPECIFIC TICKET CODE (Individual Entry)
+            $stmtTix = $pdo->prepare("SELECT * FROM ticket_instances WHERE ticket_code = ?");
+            $stmtTix->execute([$input]);
+            $specificTicket = $stmtTix->fetch(PDO::FETCH_ASSOC);
+
+            if ($specificTicket) {
+                // FOUND SPECIFIC TICKET!
+                $scannedTicketCode = $specificTicket['ticket_code'];
+                $id = $specificTicket['booking_id']; // Use parent ID to load details
+
+                if ($specificTicket['is_used'] == 1) {
+                    $message = "TICKET ALREADY USED!";
+                    $messageType = "used"; // Custom type for yellow styling
+                    $ticketStatus = "used";
+                } else {
+                    $message = "VALID TICKET SCANNED.";
+                    $messageType = "success";
+                    $ticketStatus = "valid";
+                }
+
+            } else {
+                // 3. IF NOT TICKET, ASSUME BOOKING ID (Fallback / Annual Pass)
+                $id = $input;
+            }
+
+            // LOAD PARENT BOOKING DETAILS
+            $stmt = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+            $stmt->execute([$id]);
+            $booking = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$booking) {
+                $message = "ID / CODE #$input NOT FOUND.";
+                $messageType = "error";
+            } else {
+                // Determine if Annual Pass
+                // Get Items for display
+                $stmt_items = $pdo->prepare("SELECT p.name, p.product_id, bi.quantity, bi.price_per_item as price FROM booking_items bi JOIN products p ON bi.product_id = p.product_id WHERE bi.booking_id = ?");
+                $stmt_items->execute([$id]);
+                $orderItems = $stmt_items->fetchAll(PDO::FETCH_ASSOC);
+
+                foreach ($orderItems as $item) {
+                    if (in_array($item['product_id'], ['AP1', 'AP2', 'AP3'])) {
+                        $isAnnualPass = true;
+                        break;
+                    }
+                }
+
+                // If Booking ID was scanned (not specific ticket) and it's NOT annual pass
+                if (!$scannedTicketCode && !$isAnnualPass) {
+                    $message = "BOOKING ID SCANNED. PLEASE SCAN INDIVIDUAL TICKET QRs.";
+                    $messageType = "info";
+                }
+
+                // ------------------------------------------------------------------
+                // [NEW ADDED LOGIC START] - DATE & PAYMENT CHECKER
+                // Ito ang idinagdag ko para harangin ang ibang date at unpaid status
+                // ------------------------------------------------------------------
+                $check_today = date('Y-m-d');
+                $check_visit_date = date('Y-m-d', strtotime($booking['visit_date']));
+
+                // 1. Check if Payment is Paid
+                if ($booking['payment_status'] !== 'paid') {
+                    $message = "❌ PAYMENT PENDING / UNPAID";
+                    $messageType = "error";
+                    $scannedTicketCode = null; // Hide redeem button
+                    $ticketStatus = "error";
+                }
+                // 2. Check Date (Only for Non-Annual Pass)
+                elseif (!$isAnnualPass && $check_visit_date !== $check_today) {
+                    $message = "⛔ WRONG DATE! Scheduled for: " . $check_visit_date;
+                    $messageType = "error";
+                    $scannedTicketCode = null; // Hide redeem button
+                    $ticketStatus = "error";
+                }
+                // 3. Check Expiry (For Annual Pass)
+                elseif ($isAnnualPass && $booking['expiry_date'] < $check_today) {
+                    $message = "⛔ MEMBERSHIP EXPIRED";
+                    $messageType = "error";
+                    $autoStartFace = false; 
+                }
+                // ------------------------------------------------------------------
+                // [NEW ADDED LOGIC END]
+                // ------------------------------------------------------------------
+
+                // Auto-Start Face Logic (Only for Annual Pass)
+                $today = date('Y-m-d');
+                $last_used = $booking['redeemed_at'] ? date('Y-m-d', strtotime($booking['redeemed_at'])) : '';
+                
+                // Added check: Only auto-start face if no error message exists
+                if ($isAnnualPass && $booking['payment_status'] == 'paid' && !empty($booking['face_image_path']) && $last_used != $today && $booking['expiry_date'] >= $today && $messageType != 'error') {
+                    $autoStartFace = true;
+                }
+            }
+        }
+    }
+
+    // =========================================================
+    // B. REDEEM LOGIC (Handles Ticket OR Booking)
+    // =========================================================
+    if (isset($_POST['redeem_id'])) {
+        $target_id = $_POST['redeem_id']; // Can be BookingID OR TicketCode
+        $admin_who_scanned = $_SESSION['admin_fullname'];
+
+        // Check if it's an ADD-ON (Safety)
+        if (preg_match('/^\d+\-ADD\d+$/i', $target_id)) {
+            $message = "ADD-ON QR DETECTED. NOT VALID.";
+            $messageType = "error";
+        } else {
+            
+            $proceed_to_email = false;
+            $booking_id_for_email = 0;
+
+            // 1. CHECK IF TARGET IS A TICKET CODE
+            $stmtIsTix = $pdo->prepare("SELECT * FROM ticket_instances WHERE ticket_code = ?");
+            $stmtIsTix->execute([$target_id]);
+            $ticketRow = $stmtIsTix->fetch(PDO::FETCH_ASSOC);
+
+            if ($ticketRow) {
+                // --- REDEEMING SINGLE TICKET ---
+
+                // [NEW ADDED LOGIC START] - Double Check Date Before Update
+                // Para hindi ma-bypass gamit ang Inspect Element
+                $db_chk = $pdo->prepare("SELECT visit_date, payment_status FROM bookings WHERE booking_id = ?");
+                $db_chk->execute([$ticketRow['booking_id']]);
+                $db_res = $db_chk->fetch(PDO::FETCH_ASSOC);
+                
+                if ($db_res['payment_status'] !== 'paid' || date('Y-m-d', strtotime($db_res['visit_date'])) !== date('Y-m-d')) {
+                    $message = "CANNOT REDEEM: WRONG DATE OR UNPAID";
+                    $messageType = "error";
+                    $ticketRow['is_used'] = 99; // Trick: Force 'is_used' check below to fail so it won't update
+                }
+                // [NEW ADDED LOGIC END]
+
+                if ($ticketRow['is_used'] == 0) {
+                    $updateTix = $pdo->prepare("UPDATE ticket_instances SET is_used = 1, used_at = NOW() WHERE ticket_code = ?");
+                    $updateTix->execute([$target_id]);
+                    
+                    // Log Visit
+                    $booking_id_for_email = $ticketRow['booking_id'];
+                    $stmtLog = $pdo->prepare("INSERT INTO pass_visits (booking_id, visit_date, scanned_by) VALUES (?, NOW(), ?)");
+                    $stmtLog->execute([$booking_id_for_email, "$admin_who_scanned (TICKET: $target_id)"]);
+
+                    $proceed_to_email = true;
+                } else {
+                    if($messageType != 'error') { // Only show this if date check didn't fail
+                        $message = "Ticket already used.";
+                        $messageType = "error";
+                    }
+                }
+
+            } else {
+                // --- REDEEMING WHOLE BOOKING (Annual Pass Logic) ---
+                $stmtCheck = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+                $stmtCheck->execute([$target_id]);
+                $checkRow = $stmtCheck->fetch(PDO::FETCH_ASSOC);
+
+                if ($checkRow) {
+                    // (Your existing logic for Annual Pass checks)
+                    $today = date('Y-m-d');
+                    $last_used = $checkRow['redeemed_at'] ? date('Y-m-d', strtotime($checkRow['redeemed_at'])) : '';
+                    
+                    // Simple check based on your logic:
+                    $is_AP = false; 
+                    // (Re-check items simply)
+                    $stmt_i = $pdo->prepare("SELECT product_id FROM booking_items WHERE booking_id = ?");
+                    $stmt_i->execute([$target_id]);
+                    $prods = $stmt_i->fetchAll(PDO::FETCH_COLUMN);
+                    if(array_intersect($prods, ['AP1','AP2','AP3'])) $is_AP = true;
+
+                    if ($is_AP && $last_used == $today) {
+                        $message = "ALREADY ENTERED TODAY.";
+                        $messageType = "error";
+                    } else {
+                         // [NEW ADDED LOGIC START] - Check Expiry & Payment for AP Redeem
+                         if ($checkRow['expiry_date'] < $today || $checkRow['payment_status'] !== 'paid') {
+                             $message = "EXPIRED OR UNPAID MEMBERSHIP";
+                             $messageType = "error";
+                         } else {
+                             // Proceed with redeem
+                             $stmt = $pdo->prepare("UPDATE bookings SET is_redeemed = 1, redeemed_by = ?, redeemed_at = NOW() WHERE booking_id = ?");
+                             $stmt->execute([$admin_who_scanned, $target_id]);
+                             
+                             $stmtLog = $pdo->prepare("INSERT INTO pass_visits (booking_id, visit_date, scanned_by) VALUES (?, NOW(), ?)");
+                             $stmtLog->execute([$target_id, $admin_who_scanned]);
+    
+                             $booking_id_for_email = $target_id;
+                             $proceed_to_email = true;
+                         }
+                         // [NEW ADDED LOGIC END]
+                    }
+                }
+            }
+
+            // 3. SEND RECEIPT / NOTIFICATION
+            if ($proceed_to_email && $booking_id_for_email > 0) {
+                 $stmtDetails = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+                 $stmtDetails->execute([$booking_id_for_email]);
+                 $detailsRow = $stmtDetails->fetch(PDO::FETCH_ASSOC);
+
+                 $stmtItms = $pdo->prepare("SELECT p.name, p.product_id, bi.quantity, bi.price_per_item as price FROM booking_items bi JOIN products p ON bi.product_id = p.product_id WHERE bi.booking_id = ?");
+                 $stmtItms->execute([$booking_id_for_email]);
+                 $emailItems = $stmtItms->fetchAll(PDO::FETCH_ASSOC);
+
+                 if (!empty($detailsRow['customer_email'])) {
+                    sendEntryReceipt(
+                        $detailsRow['customer_email'],
+                        $detailsRow['customer_name'],
+                        $booking_id_for_email,
+                        $detailsRow,
+                        $emailItems,
+                        $admin_who_scanned
+                    );
+                 }
+
+                 header("Location: admin_verify.php?status=success&msg=Entry+Confirmed.");
+                 exit;
+            }
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GATE ENTRY - Ajman Water Park</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #222; color: #fff; margin: 0; padding: 0; }
+        
+        /* HEADER BAR */
+        .header-bar {
+            background: #003B72; padding: 15px 20px; display: flex; justify-content: space-between;
+            align-items: center; color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            position: sticky; top: 0; z-index: 100;
+        }
+        .guard-name { font-weight: bold; font-size: 1.2rem; display: flex; align-items: center; gap: 10px; }
+        .logout-btn { color: #ff6b6b; text-decoration: none; font-weight: bold; border: 1px solid #ff6b6b; padding: 5px 15px; border-radius: 5px; transition: 0.3s; }
+        .logout-btn:hover { background: #ff6b6b; color: white; }
+
+        .main-container { max-width: 600px; margin: 20px auto; background: #fff; color: #333; border-radius: 15px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        #reader { width: 100%; background: black; }
+        .content-box { padding: 30px; text-align: center; }
+        h2 { color: #003B72; margin-top: 0; font-size: 1.8rem; }
+        
+        .search-group { display: flex; gap: 10px; margin-bottom: 20px; }
+        input[type="text"] { flex: 1; padding: 15px; border: 3px solid #003B72; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.5rem; }
+        .btn-go { background: #003B72; color: white; border: none; padding: 0 30px; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 1.2rem; }
+        
+        .status-box { padding: 20px; border-radius: 10px; margin-bottom: 20px; text-align: center; font-weight: bold; font-size: 1.2rem; }
+        .status-valid { background: #d4edda; color: #155724; border: 2px solid #c3e6cb; }
+        .status-error { background: #f8d7da; color: #721c24; border: 2px solid #f5c6cb; }
+        .status-used { background: #fff3cd; color: #856404; border: 2px solid #ffeeba; }
+        .status-member { background: #e0f7fa; color: #006064; border: 2px solid #b2ebf2; }
+        .status-info { background: #cce5ff; color: #004085; border: 2px solid #b8daff; }
+
+        .details-card { background: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #eee; margin-bottom: 20px; text-align: left; }
+        .btn-redeem { width: 100%; padding: 20px; background: #28a745; color: white; border: none; border-radius: 8px; font-size: 1.5rem; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        .btn-redeem:disabled { background: #ccc; cursor: not-allowed; }
+
+        /* TICKET LIST STYLES */
+        .ticket-list { list-style: none; padding: 0; margin: 15px 0; max-height: 200px; overflow-y: auto; }
+        .ticket-item { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #ddd; font-size: 0.9rem; align-items: center; }
+        .ticket-item.highlighted { background: #fff3cd; border: 2px solid #ffc107; }
+        .badge { padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; color: white; font-weight: bold; }
+        .badge.used { background: #dc3545; }
+        .badge.valid { background: #28a745; }
+
+        /* FACE MODAL */
+        .face-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 2000; flex-direction: column; justify-content: center; align-items: center; color: white; }
+        .compare-box { display: flex; gap: 30px; margin-bottom: 20px; }
+        .compare-item { width: 320px; height: 320px; border: 4px solid white; position: relative; background: #000; border-radius: 15px; overflow: hidden; }
+        .compare-item img, .compare-item video { width: 100%; height: 100%; object-fit: cover; }
+        .label-overlay { position: absolute; top: 0; width: 100%; background: rgba(0,0,0,0.7); text-align: center; padding: 10px; font-weight: bold; font-size: 1.2rem; color: #ffc107; }
+        .match-status { font-size: 2rem; font-weight: bold; margin-bottom: 20px; text-shadow: 2px 2px 4px #000; }
+        #successOverlay { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(40, 167, 69, 0.95); z-index: 3000; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
+        .success-msg { font-size: 3rem; font-weight: 800; color: white; margin-bottom: 20px; }
+        .success-sub { font-size: 1.5rem; color: white; }
+    </style>
+</head>
+<body>
+
+<div class="header-bar">
+    <div class="guard-name">
+        <i class="fas fa-id-badge" style="font-size:1.5rem;"></i> 
+        <div>
+            <div style="font-size:0.8rem; opacity:0.8;">GUARD ON DUTY</div>
+            <?php echo htmlspecialchars($_SESSION['admin_fullname']); ?>
+        </div>
+    </div>
+    <a href="admin_logout.php" class="logout-btn">LOGOUT</a>
+</div>
+
+<div class="main-container">
+    <div id="reader"></div>
+
+    <div class="content-box">
+        
+        <?php if (isset($_GET['status']) && $_GET['status'] == 'success'): ?>
+            <div class="status-box status-valid">
+                <i class="fas fa-check-circle"></i> ENTRY CONFIRMED!<br>
+                <span style="font-size:0.9rem; font-weight:normal;">Receipt has been sent to email.</span>
+            </div>
+            <script>setTimeout(function(){ window.location.href = 'admin_verify.php'; }, 3000);</script>
+        <?php endif; ?>
+
+        <h2><i class="fas fa-qrcode"></i> SCAN TICKET / ID</h2>
+        
+        <?php if ($message): ?>
+            <div class="status-box <?php 
+                if ($messageType == 'success') echo 'status-valid';
+                elseif ($messageType == 'used') echo 'status-used';
+                elseif ($messageType == 'info') echo 'status-info';
+                else echo 'status-error'; 
+            ?>">
+                <?php echo htmlspecialchars($message); ?>
+            </div>
+        <?php endif; ?>
+
+        <form method="POST" id="scanForm">
+            <div class="search-group">
+                <input type="text" id="booking_input" name="booking_id" placeholder="Enter ID here..." autocomplete="off" autofocus required>
+                <button type="submit" class="btn-go">GO</button>
+            </div>
+        </form>
+
+        <?php if ($booking): ?>
+            <div class="details-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #ddd; padding-bottom:10px; margin-bottom:10px;">
+                    <h3 style="margin:0; color:#003B72;">#<?php echo str_pad($booking['booking_id'], 6, '0', STR_PAD_LEFT); ?></h3>
+                    <span style="background:<?php echo ($booking['payment_status'] == 'paid') ? 'green' : 'red'; ?>; color:white; padding:5px 10px; border-radius:4px;">
+                        <?php echo strtoupper($booking['payment_status']); ?>
+                    </span>
+                </div>
+                
+                <h2 style="margin:10px 0; color:#333;"><?php echo htmlspecialchars($booking['customer_name']); ?></h2>
+                <p style="margin:0; color:#666;"><?php echo htmlspecialchars($booking['customer_email']); ?></p>
+                
+                <?php 
+                    // Fetch all tickets for this booking
+                    $stmtAllTix = $pdo->prepare("SELECT * FROM ticket_instances WHERE booking_id = ?");
+                    $stmtAllTix->execute([$booking['booking_id']]);
+                    $allTickets = $stmtAllTix->fetchAll(PDO::FETCH_ASSOC);
+                ?>
+                <?php if(!empty($allTickets)): ?>
+                    <p style="margin:15px 0 5px; font-weight:bold; color:#003B72; font-size:0.9rem;">TICKETS IN THIS ORDER:</p>
+                    <ul class="ticket-list">
+                        <?php foreach($allTickets as $t): 
+                            $isHighlighted = ($scannedTicketCode == $t['ticket_code']);
+                            $isUsed = ($t['is_used'] == 1);
+                        ?>
+                            <li class="ticket-item <?php echo $isHighlighted ? 'highlighted' : ''; ?>">
+                                <div>
+                                    <strong><?php echo htmlspecialchars($t['ticket_type']); ?></strong>
+                                    <br><small style="color:#666; font-family:monospace;"><?php echo $t['ticket_code']; ?></small>
+                                </div>
+                                <span class="badge <?php echo $isUsed ? 'used' : 'valid'; ?>">
+                                    <?php echo $isUsed ? 'USED' : 'VALID'; ?>
+                                </span>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                <?php endif; ?>
+
+                <?php if($isAnnualPass): ?>
+                      <p style="margin-top:5px;"><strong>Expiry:</strong> <?php echo date("F d, Y", strtotime($booking['expiry_date'])); ?></p>
+                <?php endif; ?>
+            </div>
+
+            <?php 
+                
+                $today = date('Y-m-d');
+                $last_used = $booking['redeemed_at'] ? date('Y-m-d', strtotime($booking['redeemed_at'])) : '';
+                $member_entered_today = ($isAnnualPass && $last_used == $today);
+            ?>
+
+            <?php if ($booking['payment_status'] !== 'paid'): ?>
+                <div class="status-box status-error">❌ UNPAID TICKET</div>
+            
+            <?php elseif ($isAnnualPass): ?>
+                <?php if ($booking['expiry_date'] < $today): ?>
+                    <div class="status-box status-error">⚠️ EXPIRED MEMBERSHIP</div>
+                <?php elseif ($member_entered_today): ?>
+                    <div class="status-box status-used">⛔ ALREADY ENTERED TODAY</div>
+                <?php else: ?>
+                    <div class="status-box status-member">✅ PLEASE LOOK AT THE CAMERA...</div>
+                    <button onclick="openFaceVerify('uploads/faces/<?php echo $booking['face_image_path']; ?>')" class="btn-redeem btn-member" style="margin-top:10px;">
+                        START FACE CHECK
+                    </button>
+                <?php endif; ?>
+
+            <?php else: ?>
+                <?php if ($scannedTicketCode && $ticketStatus == 'valid'): ?>
+                    <form method="POST">
+                        <input type="hidden" name="redeem_id" value="<?php echo $scannedTicketCode; ?>">
+                        <button type="submit" class="btn-redeem">✅ ADMIT TICKET (<?php echo substr($scannedTicketCode, -4); ?>)</button>
+                    </form>
+                <?php elseif ($scannedTicketCode && $ticketStatus == 'used'): ?>
+                    <div class="status-box status-used">⚠️ THIS TICKET IS ALREADY USED</div>
+                <?php elseif ($ticketStatus == 'error'): ?>
+                     <div class="status-box status-error">❌ ENTRY DENIED</div>
+                <?php else: ?>
+                    <div class="status-box status-info">Scan a specific ticket QR to admit.</div>
+                <?php endif; ?>
+
+            <?php endif; ?>
+
+        <?php endif; ?>
+    </div>
+</div>
+
+<div class="face-modal" id="faceModal">
+    <div id="successOverlay">
+        <div class="success-msg"><i class="fas fa-check-circle"></i> VERIFIED!</div>
+        <div class="success-sub">Welcome back, <?php echo htmlspecialchars($booking['customer_name'] ?? 'Guest'); ?></div>
+        <div class="success-sub" style="margin-top:20px; font-size:1.2rem;">Sending Receipt to Email...</div>
+    </div>
+
+    <h2><i class="fas fa-expand"></i> LOOK AT THE CAMERA</h2>
+    
+    <div class="compare-box">
+        <div class="compare-item">
+            <div class="label-overlay">ON FILE</div>
+            <img id="storedFace" crossorigin="anonymous">
+        </div>
+        <div class="compare-item">
+            <div class="label-overlay">LIVE CAMERA</div>
+            <video id="liveVideo" autoplay muted></video>
+        </div>
+    </div>
+    
+    <div id="statusMsg" class="match-status" style="color:yellow;">Initializing System...</div>
+    
+    <form method="POST" id="faceRedeemForm">
+        <input type="hidden" name="redeem_id" value="<?php echo $booking['booking_id'] ?? ''; ?>">
+    </form>
+
+    <button onclick="closeFaceVerify()" style="padding:15px 30px; font-size:1rem; background:#444; color:white; border:none; border-radius:5px; cursor:pointer; margin-top:20px;">
+        CANCEL
+    </button>
+</div>
+
+<script>
+    // --- 1. QR SCANNER LOGIC ---
+    let html5QrcodeScanner;
+    function startScanner() {
+        if(html5QrcodeScanner) return;
+        html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: {width: 250, height: 250} });
+        html5QrcodeScanner.render((text) => {
+            document.getElementById('booking_input').value = text;
+            html5QrcodeScanner.clear();
+            document.getElementById('scanForm').submit();
+        });
+    }
+    window.onload = function() {
+        startScanner();
+        loadModels(); 
+    };
+
+    // --- 2. FACE API & AUTOMATION ---
+    let isModelsLoaded = false;
+    let matchInterval;
+    const autoStart = <?php echo json_encode($autoStartFace); ?>;
+    const facePath = "<?php echo isset($booking['face_image_path']) ? 'uploads/faces/' . $booking['face_image_path'] : ''; ?>";
+
+    async function loadModels() {
+        await faceapi.nets.ssdMobilenetv1.loadFromUri('models');
+        await faceapi.nets.faceLandmark68Net.loadFromUri('models');
+        await faceapi.nets.faceRecognitionNet.loadFromUri('models');
+        isModelsLoaded = true;
+        if(autoStart && facePath !== "") setTimeout(() => { openFaceVerify(facePath); }, 1000);
+    }
+
+    async function openFaceVerify(imagePath) {
+        document.getElementById('faceModal').style.display = 'flex';
+        document.getElementById('storedFace').src = imagePath;
+        const video = document.getElementById('liveVideo');
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 320 } });
+            video.srcObject = stream;
+            document.getElementById('statusMsg').innerText = "Scanning Face...";
+            if(isModelsLoaded) startMatching(imagePath, video);
+        } catch (err) { alert("Camera Error: " + err); }
+    }
+
+    async function startMatching(imagePath, video) {
+        const img = document.getElementById('storedFace');
+        const storedDetection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
+        if (!storedDetection) return; 
+        const faceMatcher = new faceapi.FaceMatcher(storedDetection);
+
+        matchInterval = setInterval(async () => {
+            const liveDetection = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+            if (liveDetection) {
+                const bestMatch = faceMatcher.findBestMatch(liveDetection.descriptor);
+                const matchScore = Math.round((1 - bestMatch.distance) * 100);
+
+                if (bestMatch.distance < 0.45) {
+                    clearInterval(matchInterval);
+                    document.getElementById('statusMsg').innerText = "MATCH: " + matchScore + "%";
+                    document.getElementById('statusMsg').style.color = "#28a745";
+                    document.getElementById('successOverlay').style.display = 'flex';
+                    setTimeout(() => { document.getElementById('faceRedeemForm').submit(); }, 2000);
+                } else {
+                    document.getElementById('statusMsg').innerText = "Scanning... (" + matchScore + "%)";
+                }
+            }
+        }, 500);
+    }
+
+    function closeFaceVerify() {
+        document.getElementById('faceModal').style.display = 'none';
+        if(matchInterval) clearInterval(matchInterval);
+        const video = document.getElementById('liveVideo');
+        if(video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
+        document.getElementById('booking_input').focus();
+    }
+
+    // --- 3. AUTO CLEAR ---
+    const hasBookingData = <?php echo $booking ? 'true' : 'false'; ?>;
+    const hasErrorMsg = <?php echo ($message && $messageType != 'success') ? 'true' : 'false'; ?>;
+    
+    if (hasBookingData || hasErrorMsg) {
+        const timeoutDuration = hasErrorMsg ? 5000 : 15000;
+        setTimeout(() => {
+            const modal = document.getElementById('faceModal');
+            if (!modal || modal.style.display === 'none' || modal.style.display === '') {
+                window.location.href = 'admin_verify.php';
+            }
+        }, timeoutDuration);
+    }
+</script>
+
+</body>
+</html>

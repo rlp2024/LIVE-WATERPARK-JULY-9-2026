@@ -1,0 +1,2032 @@
+<?php
+session_start();
+include_once 'db_connect.php';
+include_once 'admin_audit.php';
+
+// =========================================================
+// 1. GLOBAL SETTINGS & INITIALIZATION
+// =========================================================
+
+// Fix Timezone
+date_default_timezone_set('Asia/Dubai'); 
+
+// IMPORTANT: DEFINE ACTIVE TAB IMMEDIATELY
+// Ito ang solusyon sa error na "Undefined variable: active_tab"
+$active_tab = isset($_GET['view']) ? $_GET['view'] : 'sales';
+
+
+// =========================================================
+// 2. SECURITY & ROLE CHECK (BOSS ONLY)
+// =========================================================
+if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
+    header("Location: admin_login.php");
+    exit;
+}
+
+if ($_SESSION['admin_role'] !== 'boss') {
+    // Staff/Guard redirect to scanner
+    header("Location: admin_scanner_select.php");
+    exit;
+}
+
+
+// =========================================================
+// PART Y: VISITOR HISTORY LOGIC (BACKTRACKING)
+// =========================================================
+$hist_start = $_GET['h_start'] ?? date('Y-m-01'); // Default: 1st of month
+$hist_end   = $_GET['h_end']   ?? date('Y-m-d');  // Default: Today
+
+$histData = [];
+$histTotalPax = 0;
+$histBusiestDay = ['date' => '-', 'count' => 0];
+$histLabels = [];
+$histCounts = [];
+
+// Only run heavy query if on visits tab to optimize performance
+if ($active_tab == 'visits') {
+    
+    $sqlHist = "
+        SELECT 
+            DATE(entry_time) as visit_day,
+            type_label,
+            COUNT(*) as pax_count
+        FROM (
+            SELECT used_at as entry_time, ticket_type as type_label FROM ticket_instances WHERE is_used = 1
+            UNION ALL
+            SELECT visit_date as entry_time, 'Member Pass' as type_label FROM pass_visits
+        ) as all_entries
+        WHERE entry_time BETWEEN ? AND ?
+        GROUP BY visit_day, type_label
+        ORDER BY visit_day DESC
+    ";
+    
+    $stmtHist = $pdo->prepare($sqlHist);
+    $stmtHist->execute([$hist_start . ' 00:00:00', $hist_end . ' 23:59:59']);
+    $rawHist = $stmtHist->fetchAll(PDO::FETCH_ASSOC);
+
+    // Re-structure data for display [Date => [Total, Breakdown]]
+    foreach ($rawHist as $row) {
+        $d = $row['visit_day'];
+        
+        if (!isset($histData[$d])) {
+            $histData[$d] = ['total' => 0, 'breakdown' => []];
+        }
+        
+        $histData[$d]['total'] += $row['pax_count'];
+        $histData[$d]['breakdown'][$row['type_label']] = $row['pax_count'];
+        
+        $histTotalPax += $row['pax_count'];
+    }
+
+    // Determine Busiest Day & Chart Data
+    // (Sort ascending for chart)
+    $chartData = $histData;
+    ksort($chartData); 
+    
+    foreach ($chartData as $date => $info) {
+        $histLabels[] = date('M d', strtotime($date));
+        $histCounts[] = $info['total'];
+        
+        if ($info['total'] > $histBusiestDay['count']) {
+            $histBusiestDay = ['date' => date('M d, Y', strtotime($date)), 'count' => $info['total']];
+        }
+    }
+}
+
+
+// =========================================================
+// PART X: LIVE CROWD MONITOR & FORECASTING
+// =========================================================
+
+// 1. SET DATES
+$todayDate = date('Y-m-d');
+$currentYear = date('Y');
+
+// 2. DAILY HEADCOUNT (Actual Entries Today)
+// Binibilang nito ang Ticket Instances na na-scan ngayong araw + Annual Pass visits
+$sqlDaily = "
+    SELECT 
+        COALESCE(SUM(count), 0) as total_pax
+    FROM (
+        SELECT COUNT(*) as count FROM ticket_instances WHERE is_used = 1 AND DATE(used_at) = '$todayDate'
+        UNION ALL
+        SELECT COUNT(*) as count FROM pass_visits WHERE DATE(visit_date) = '$todayDate'
+    ) as combined_entries
+";
+$stmtDaily = $pdo->query($sqlDaily);
+$live_pax_today = $stmtDaily->fetchColumn();
+
+
+// 3. EXPECTED ARRIVALS (Sold Tickets for Today)
+// Binibilang nito ang tickets na binayaran na para sa araw na ito
+$sqlExpected = "
+    SELECT COUNT(*) 
+    FROM ticket_instances t
+    JOIN bookings b ON t.booking_id = b.booking_id
+    WHERE b.payment_status = 'paid'
+    AND DATE(b.visit_date) = '$todayDate'
+";
+$stmtExpected = $pdo->query($sqlExpected);
+$expected_pax_today = $stmtExpected->fetchColumn() ?: 0;
+
+
+// 4. YEARLY POPULATION (Total Entries This Year)
+$sqlYearly = "
+    SELECT 
+        COALESCE(SUM(count), 0) as total_year
+    FROM (
+        SELECT COUNT(*) as count FROM ticket_instances WHERE is_used = 1 AND YEAR(used_at) = '$currentYear'
+        UNION ALL
+        SELECT COUNT(*) as count FROM pass_visits WHERE YEAR(visit_date) = '$currentYear'
+    ) as combined_year
+";
+$stmtYearly = $pdo->query($sqlYearly);
+$total_pax_year = $stmtYearly->fetchColumn();
+
+
+// 5. MONTHLY POPULATION (Total Entries This Month - NEW ADDITION)
+// Kinukuha nito ang total visitors base sa current month at year
+$sqlMonthly = "
+    SELECT 
+        COALESCE(SUM(count), 0) as total_month
+    FROM (
+        SELECT COUNT(*) as count FROM ticket_instances 
+        WHERE is_used = 1 
+        AND MONTH(used_at) = MONTH('$todayDate') 
+        AND YEAR(used_at) = '$currentYear'
+        
+        UNION ALL
+        
+        SELECT COUNT(*) as count FROM pass_visits 
+        WHERE MONTH(visit_date) = MONTH('$todayDate') 
+        AND YEAR(visit_date) = '$currentYear'
+    ) as combined_month
+";
+$stmtMonthly = $pdo->query($sqlMonthly);
+$total_pax_month = $stmtMonthly->fetchColumn();
+
+
+// 6. UPCOMING ARRIVALS (7-DAY FORECAST)
+// Ito ang sasagot sa request mo na makita ang Jan 25 bookings kahit Jan 24 pa lang
+$upcomingData = [];
+try {
+    $sqlForecast = "
+        SELECT 
+            DATE(b.visit_date) as schedule_date,
+            COUNT(*) as pax
+        FROM ticket_instances t
+        JOIN bookings b ON t.booking_id = b.booking_id
+        WHERE b.payment_status = 'paid'
+        AND DATE(b.visit_date) > '$todayDate' 
+        GROUP BY schedule_date
+        ORDER BY schedule_date ASC
+        LIMIT 7
+    ";
+    $stmtForecast = $pdo->query($sqlForecast);
+    $upcomingData = $stmtForecast->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $upcomingData = [];
+}
+
+// 7. DEMOGRAPHICS BREAKDOWN (Today)
+// Note: Nakabase ito sa 'ticket_type' name sa database mo.
+$demoData = [];
+try {
+    $sqlDemo = "
+        SELECT ticket_type, COUNT(*) as qty 
+        FROM ticket_instances 
+        WHERE is_used = 1 AND DATE(used_at) = '$todayDate'
+        GROUP BY ticket_type
+    ";
+    $stmtDemo = $pdo->query($sqlDemo);
+    $demoData = $stmtDemo->fetchAll(PDO::FETCH_KEY_PAIR); // Output: ['Adult' => 50, 'Child' => 20]
+    
+    // Check Annual Pass Visits count for today
+    $sqlAP = "SELECT COUNT(*) FROM pass_visits WHERE DATE(visit_date) = '$todayDate'";
+    $apCount = $pdo->query($sqlAP)->fetchColumn();
+    if($apCount > 0) {
+        $demoData['Members/Pass'] = $apCount;
+    }
+} catch (Exception $e) {
+    $demoData = [];
+}
+
+
+// ===============================
+// STAFF DIRECTORY + STAFF LOG MODAL + ADD STAFF (BOSS)
+// ===============================
+$staffMsg = "";
+$staffType = "success";
+
+if (isset($_GET['staff_msg'])) {
+    $staffMsg = $_GET['staff_msg'];
+    $staffType = $_GET['staff_type'] ?? 'success';
+}
+
+// Fetch staff list (UPDATED: Include tracking columns)
+$staffList = [];
+try {
+    $stmtS = $pdo->prepare("
+        SELECT admin_id, username, full_name, role, last_active_at, current_location, created_by
+        FROM admins
+        WHERE role IN ('boss','staff','guard')
+        ORDER BY role ASC, full_name ASC
+    ");
+    $stmtS->execute();
+    $staffList = $stmtS->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $staffList = [];
+}
+
+// Create staff (boss only) - UPDATED WITH LOCATION & CREATED BY
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_staff'])) {
+    $nu = trim($_POST['new_username'] ?? '');
+    $nf = trim($_POST['new_full_name'] ?? '');
+    $np = trim($_POST['new_password'] ?? '');
+    $loc = trim($_POST['assign_location'] ?? 'General Area'); // New Location
+    $nr = 'staff'; // force staff
+    
+    // Sino ang nag-create?
+    $creator = $_SESSION['admin_fullname'] ?? $_SESSION['admin_username'] ?? 'Boss';
+
+    if ($nu === '' || $nf === '' || $np === '') {
+        $staffMsg = "Fill up Username, Full Name, Password.";
+        $staffType = "error";
+    } else {
+        try {
+            $chk = $pdo->prepare("SELECT COUNT(*) FROM admins WHERE username=? LIMIT 1");
+            $chk->execute([$nu]);
+            if ((int)$chk->fetchColumn() > 0) {
+                $staffMsg = "Username already exists.";
+                $staffType = "error";
+            } else {
+                // INSERT updated columns
+                $ins = $pdo->prepare("INSERT INTO admins (username, full_name, password, role, current_location, created_by) VALUES (?,?,?,?,?,?)");
+                $ins->execute([$nu, $nf, $np, $nr, $loc, $creator]);
+
+                header("Location: admin_dashboard.php?view=stafflogs&staff_msg=" . urlencode("Staff created successfully.") . "&staff_type=success");
+                exit;
+            }
+        } catch (Exception $e) {
+            $staffMsg = "System error: " . $e->getMessage();
+            $staffType = "error";
+        }
+    }
+}
+
+// staff modal logs
+$showStaffModal = false;
+$selectedStaff = null;
+$staffLogs = [];
+$staffStats = ['login'=>0,'logout'=>0,'failed'=>0,'total'=>0];
+
+// default latest range: last 7 days (user-friendly)
+$stStart = $_GET['st_start'] ?? date('Y-m-d', strtotime('-7 days'));
+$stEnd   = $_GET['st_end']   ?? date('Y-m-d');
+
+$sqlStStart = $stStart . " 00:00:00";
+$sqlStEnd   = $stEnd   . " 23:59:59";
+
+if (isset($_GET['staff_id']) && is_numeric($_GET['staff_id'])) {
+    $sid = (int)$_GET['staff_id'];
+    $showStaffModal = true;
+
+    $stmt = $pdo->prepare("SELECT admin_id, username, full_name, role FROM admins WHERE admin_id=? LIMIT 1");
+    $stmt->execute([$sid]);
+    $selectedStaff = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($selectedStaff) {
+        try {
+            $stmtL = $pdo->prepare("
+                SELECT *
+                FROM admin_auth_logs
+                WHERE created_at BETWEEN ? AND ?
+                  AND role IN ('boss','staff')
+                  AND (username = ? OR full_name = ?)
+                ORDER BY created_at DESC
+                LIMIT 300
+            ");
+            $stmtL->execute([$sqlStStart, $sqlStEnd, $selectedStaff['username'], $selectedStaff['full_name']]);
+            $staffLogs = $stmtL->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($staffLogs as $lg) {
+                $staffStats['total']++;
+                if ($lg['action'] === 'LOGIN') $staffStats['login']++;
+                if ($lg['action'] === 'LOGOUT') $staffStats['logout']++;
+                if ($lg['action'] === 'FAILED_LOGIN') $staffStats['failed']++;
+            }
+        } catch (Exception $e) {
+            $staffLogs = [];
+        }
+    }
+}
+
+
+
+
+// =========================================================
+// PART 0: HANDLE RESEND EMAIL ACTION (INTEGRATED)
+// =========================================================
+if (isset($_GET['action']) && $_GET['action'] == 'resend' && isset($_GET['booking_id'])) {
+    
+    $resend_id = (int)$_GET['booking_id'];
+    
+    if (file_exists('email_helper.php')) {
+        require_once 'email_helper.php';
+        
+        try {
+            $stmt = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ?");
+            $stmt->execute([$resend_id]);
+            $booking = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($booking) {
+                // FIXED: Fetching items with correct logic (handling both Products and Ticket Types)
+                $stmtItems = $pdo->prepare("SELECT product_id, quantity, price_per_item as price FROM booking_items WHERE booking_id = ?");
+                $stmtItems->execute([$resend_id]);
+                $rawItems = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+                
+                $items = [];
+                foreach($rawItems as $row) {
+                    $name = "Unknown Item";
+                    $pid = $row['product_id'];
+                    
+                    if (strpos($pid, 'type_') === 0) {
+                        $typeId = str_replace('type_', '', $pid);
+                        $stmtT = $pdo->prepare("SELECT category, sub_label FROM ticket_types WHERE type_id = ?");
+                        $stmtT->execute([$typeId]);
+                        $t = $stmtT->fetch();
+                        if($t) $name = $t['category'] . ' (' . $t['sub_label'] . ')';
+                    } else {
+                        $stmtP = $pdo->prepare("SELECT name FROM products WHERE product_id = ?");
+                        $stmtP->execute([$pid]);
+                        $p = $stmtP->fetch();
+                        if($p) $name = $p['name'];
+                    }
+                    
+                    $items[] = [
+                        'product_id' => $pid,
+                        'name' => $name,
+                        'quantity' => $row['quantity'],
+                        'price' => $row['price']
+                    ];
+                }
+
+                // Call the helper function
+                $sent = sendBookingConfirmation($booking['customer_email'], $booking['customer_name'], $booking['booking_id'], $booking, $items);
+
+                if ($sent) {
+                    header("Location: admin_dashboard.php?view=members&msg=Email resent successfully to " . urlencode($booking['customer_name']));
+                    exit;
+                } else {
+                    header("Location: admin_dashboard.php?view=members&error=Failed to send email. Check mailer settings.");
+                    exit;
+                }
+            }
+        } catch (Exception $e) {
+            header("Location: admin_dashboard.php?view=members&error=System Error: " . urlencode($e->getMessage()));
+            exit;
+        }
+    } else {
+        header("Location: admin_dashboard.php?view=members&error=email_helper.php not found!");
+        exit;
+    }
+}
+
+
+// =========================================================
+// PART 0C: CHECK TABLES FOR OPTIONAL FEATURES
+// =========================================================
+$addonRedeemLogsEnabled = false;
+try {
+    $pdo->query("SELECT 1 FROM addon_redemption_logs LIMIT 1");
+    $addonRedeemLogsEnabled = true;
+} catch (Exception $e) {
+    $addonRedeemLogsEnabled = false;
+}
+
+// =========================================================
+// PART 0D: SCANNER LOGS PAGE (ADD-ON REDEMPTION LOGS)
+// =========================================================
+$scannerStart = isset($_GET['s_start']) ? $_GET['s_start'] : date('Y-m-d');
+$scannerEnd   = isset($_GET['s_end'])   ? $_GET['s_end']   : date('Y-m-d');
+$sqlScannerStart = $scannerStart . ' 00:00:00';
+$sqlScannerEnd   = $scannerEnd . ' 23:59:59';
+
+// Filter by add-on product (optional)
+$scannerFilter = isset($_GET['scanner_pid']) ? strtoupper(trim($_GET['scanner_pid'])) : 'ALL';
+
+// build dropdown list from add-on products (category_id = 6)
+$addonProducts = [];
+try {
+    $stmtAdd = $pdo->prepare("SELECT product_id, name FROM products WHERE category_id=6 ORDER BY name ASC");
+    $stmtAdd->execute();
+    $addonProducts = $stmtAdd->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $addonProducts = [];
+}
+
+// scanner logs data
+$scannerLogs = [];
+if ($addonRedeemLogsEnabled) {
+    try {
+        if ($scannerFilter !== 'ALL') {
+            $stmtSL = $pdo->prepare("
+                SELECT l.*, p.name AS product_name
+                FROM addon_redemption_logs l
+                LEFT JOIN products p ON p.product_id = l.product_id
+                WHERE l.redeemed_at BETWEEN ? AND ?
+                AND l.product_id = ?
+                ORDER BY l.redeemed_at DESC
+            ");
+            $stmtSL->execute([$sqlScannerStart, $sqlScannerEnd, $scannerFilter]);
+        } else {
+            $stmtSL = $pdo->prepare("
+                SELECT l.*, p.name AS product_name
+                FROM addon_redemption_logs l
+                LEFT JOIN products p ON p.product_id = l.product_id
+                WHERE l.redeemed_at BETWEEN ? AND ?
+                ORDER BY l.redeemed_at DESC
+            ");
+            $stmtSL->execute([$sqlScannerStart, $sqlScannerEnd]);
+        }
+
+        $scannerLogs = $stmtSL->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        $scannerLogs = [];
+    }
+}
+
+// =========================================================
+// PART 0B: ADD-ON HISTORY (BACKTRACK) MODAL
+// - Uses addon_purchase_logs table (optional)
+// - Shows timeline of top-up purchases + time
+// =========================================================
+$addonLogsEnabled = false;
+$show_addon_history_modal = false;
+$addon_history_logs = [];
+$addon_history_booking = null;
+
+try {
+    $pdo->query("SELECT 1 FROM addon_purchase_logs LIMIT 1");
+    $addonLogsEnabled = true;
+} catch (Exception $e) {
+    $addonLogsEnabled = false;
+}
+
+if (isset($_GET['addon_history_id'])) {
+    $hid = (int)$_GET['addon_history_id'];
+    $show_addon_history_modal = true;
+
+    try {
+        $stmtB = $pdo->prepare("SELECT * FROM bookings WHERE booking_id = ? LIMIT 1");
+        $stmtB->execute([$hid]);
+        $addon_history_booking = $stmtB->fetch(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        $addon_history_booking = null;
+    }
+
+    if ($addonLogsEnabled) {
+        try {
+            $stmtL = $pdo->prepare("SELECT * FROM addon_purchase_logs WHERE booking_id = ? ORDER BY created_at DESC");
+            $stmtL->execute([$hid]);
+            $addon_history_logs = $stmtL->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {
+            $addon_history_logs = [];
+        }
+    }
+}
+
+
+// =========================================================
+// PART A: SALES DASHBOARD LOGIC
+// =========================================================
+$defaultStart = date('Y-m-01');
+$defaultEnd   = date('Y-m-d');
+$start_date = isset($_GET['start_date']) ? $_GET['start_date'] : $defaultStart;
+$end_date   = isset($_GET['end_date'])   ? $_GET['end_date']   : $defaultEnd;
+$sql_end_date = $end_date . ' 23:59:59';
+$sql_start_date = $start_date . ' 00:00:00';
+
+// A. REVENUE
+$stmt = $pdo->prepare("SELECT SUM(total_amount) FROM bookings WHERE payment_status = 'paid' AND created_at BETWEEN ? AND ?");
+$stmt->execute([$sql_start_date, $sql_end_date]);
+$periodRevenue = $stmt->fetchColumn() ?: 0;
+
+// B. TRANSACTIONS
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM bookings WHERE payment_status = 'paid' AND created_at BETWEEN ? AND ?");
+$stmt->execute([$sql_start_date, $sql_end_date]);
+$periodBookings = $stmt->fetchColumn() ?: 0;
+
+// C. TICKETS SOLD
+$stmt = $pdo->prepare("SELECT SUM(bi.quantity) FROM booking_items bi JOIN bookings b ON bi.booking_id = b.booking_id WHERE b.payment_status = 'paid' AND b.created_at BETWEEN ? AND ?");
+$stmt->execute([$sql_start_date, $sql_end_date]);
+$totalTicketsSold = $stmt->fetchColumn() ?: 0;
+
+// D. GRAPH DATA
+$stmt = $pdo->prepare("SELECT DATE(created_at) as sale_date, SUM(total_amount) as daily_total FROM bookings WHERE payment_status = 'paid' AND created_at BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY sale_date ASC");
+$stmt->execute([$sql_start_date, $sql_end_date]);
+$graphData = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$labels = []; $dataPoints = [];
+foreach ($graphData as $row) {
+    $labels[] = date("M d", strtotime($row['sale_date']));
+    $dataPoints[] = $row['daily_total'];
+}
+
+// E. TRANSACTION LIST
+// Updated to handle both products and ticket_types for summary
+$stmt = $pdo->prepare("
+    SELECT b.* FROM bookings b 
+    WHERE b.created_at BETWEEN ? AND ? 
+    ORDER BY b.created_at DESC
+");
+$stmt->execute([$sql_start_date, $sql_end_date]);
+$rawTransactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Process transactions to add items summary manually
+$transactions = [];
+foreach($rawTransactions as $t) {
+    $stmtItems = $pdo->prepare("SELECT product_id, quantity FROM booking_items WHERE booking_id = ?");
+    $stmtItems->execute([$t['booking_id']]);
+    $items = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+    
+    $summary = [];
+    foreach($items as $i) {
+        $pid = $i['product_id'];
+        $name = $pid;
+        
+        if (strpos($pid, 'type_') === 0) {
+            $tid = str_replace('type_', '', $pid);
+            $st = $pdo->prepare("SELECT category FROM ticket_types WHERE type_id = ?");
+            $st->execute([$tid]);
+            $res = $st->fetch();
+            if($res) $name = $res['category'];
+        } else {
+            $sp = $pdo->prepare("SELECT name FROM products WHERE product_id = ?");
+            $sp->execute([$pid]);
+            $resp = $sp->fetch();
+            if($resp) $name = $resp['name'];
+        }
+        $summary[] = "$name (x{$i['quantity']})";
+    }
+    $t['items_summary'] = implode('<br>', $summary);
+
+    // --- ADD-ON CHECK + LAST TOPUP TIME (BACKTRACK) ---
+    // Assumption: Add-ons are products.category_id = 6
+    $t['has_addons'] = false;
+    $t['addon_qty'] = 0;
+    $t['topup_count'] = 0;
+    $t['last_addon_purchase_at'] = null;
+
+    // Check add-ons currently attached to booking_items
+    try {
+        $stmtA = $pdo->prepare("
+            SELECT COALESCE(SUM(bi.quantity),0) AS addon_qty
+            FROM booking_items bi
+            JOIN products p ON bi.product_id = p.product_id
+            WHERE bi.booking_id = ? AND p.category_id = 6
+        ");
+        $stmtA->execute([$t['booking_id']]);
+        $addonQty = (int)$stmtA->fetchColumn();
+        $t['addon_qty'] = $addonQty;
+        $t['has_addons'] = ($addonQty > 0);
+    } catch (Exception $e) {
+        // ignore if products table join fails for some reason
+        $t['has_addons'] = false;
+        $t['addon_qty'] = 0;
+    }
+
+    // Pull top-up logs (if table exists)
+    if ($addonLogsEnabled) {
+        try {
+            $stmtC = $pdo->prepare("
+                SELECT COUNT(*) 
+                FROM addon_purchase_logs
+                WHERE booking_id = ? AND action='TOPUP' AND payment_status='paid'
+            ");
+            $stmtC->execute([$t['booking_id']]);
+            $t['topup_count'] = (int)$stmtC->fetchColumn();
+
+            $stmtLast = $pdo->prepare("
+                SELECT MAX(created_at)
+                FROM addon_purchase_logs
+                WHERE booking_id = ? AND action='TOPUP' AND payment_status='paid'
+            ");
+            $stmtLast->execute([$t['booking_id']]);
+            $t['last_addon_purchase_at'] = $stmtLast->fetchColumn();
+        } catch (Exception $e) {
+            $t['topup_count'] = 0;
+            $t['last_addon_purchase_at'] = null;
+        }
+    }
+
+    $transactions[] = $t;
+}
+
+
+
+// =========================================================
+// PART B: DISCOUNT CODES LOGIC
+// =========================================================
+$msg_discount = "";
+$msg_type = "";
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_code'])) {
+    $agent_name = $_POST['agent_name'];
+    $code_base = !empty($_POST['custom_code']) ? $_POST['custom_code'] : strtoupper(substr(str_replace(' ', '', $agent_name), 0, 4)) . rand(100,999);
+    $code = strtoupper($code_base);
+    $discount_value = $_POST['discount_value'];
+    $duration_days = $_POST['duration'];
+    $usage_limit = isset($_POST['usage_limit']) ? (int)$_POST['usage_limit'] : 1;
+    
+    $d_start = date('Y-m-d');
+    $d_end = date('Y-m-d', strtotime("+$duration_days days"));
+
+    try {
+        $stmtD = $pdo->prepare("INSERT INTO discount_codes (code, agent_name, discount_value, start_date, end_date, usage_limit, usage_count) VALUES (?, ?, ?, ?, ?, ?, 0)");
+        $stmtD->execute([$code, $agent_name, $discount_value, $d_start, $d_end, $usage_limit]);
+        header("Location: admin_dashboard.php?view=discounts&msg_code=success&c=" . urlencode($code) . "&l=" . $usage_limit);
+        exit;
+    } catch (Exception $e) {
+        header("Location: admin_dashboard.php?view=discounts&msg_code=error");
+        exit;
+    }
+}
+
+if(isset($_GET['msg_code'])) {
+    if($_GET['msg_code'] == 'success') {
+        $c = isset($_GET['c']) ? htmlspecialchars($_GET['c']) : '';
+        $l = isset($_GET['l']) ? htmlspecialchars($_GET['l']) : '';
+        $msg_discount = "Code <strong>$c</strong> created! (Limit: $l use)";
+        $msg_type = "success";
+    } elseif($_GET['msg_code'] == 'error') {
+        $msg_discount = "Error: Code might already exist.";
+        $msg_type = "error";
+    }
+}
+
+if (isset($_GET['delete_code'])) {
+    $pdo->prepare("DELETE FROM discount_codes WHERE id = ?")->execute([$_GET['delete_code']]);
+    header("Location: admin_dashboard.php?view=discounts");
+    exit;
+}
+
+$allCodes = [];
+try { $allCodes = $pdo->query("SELECT * FROM discount_codes ORDER BY created_at DESC")->fetchAll(PDO::FETCH_ASSOC); } catch (Exception $e) { $allCodes = []; }
+
+
+// =========================================================
+// PART C: MEMBERSHIP LOGIC (UPDATED FOR LIVE SEARCH & FACE)
+// =========================================================
+$members = [];
+
+try {
+    // UPDATED QUERY: Fetch members based on expiry date being set
+    $sqlMembers = "
+        SELECT 
+            b.booking_id,
+            b.customer_name,
+            b.customer_email,
+            b.customer_phone,
+            b.visit_date as start_date,
+            b.expiry_date,
+            b.face_image_path
+        FROM bookings b
+        WHERE b.payment_status = 'paid' 
+        AND b.expiry_date IS NOT NULL
+        ORDER BY b.expiry_date DESC
+    ";
+    
+    $members = $pdo->query($sqlMembers)->fetchAll(PDO::FETCH_ASSOC);
+
+    // Get product name for each member manually to avoid complex joins with mixed ID types
+    foreach($members as &$m) {
+        $stmtP = $pdo->prepare("SELECT product_id FROM booking_items WHERE booking_id = ? LIMIT 1");
+        $stmtP->execute([$m['booking_id']]);
+        $prod = $stmtP->fetch();
+        
+        $m['product_id'] = $prod ? $prod['product_id'] : 'Unknown';
+        
+        if($m['product_id'] == 'AP1') $m['pass_name'] = 'Silver Pass';
+        elseif($m['product_id'] == 'AP2') $m['pass_name'] = 'Gold Pass';
+        elseif($m['product_id'] == 'AP3') $m['pass_name'] = 'Platinum Pass';
+        else $m['pass_name'] = 'Annual Pass';
+    }
+
+} catch (Exception $e) {
+    $members = [];
+}
+
+// --- NEW LOGIC: FETCH HISTORY FOR MODAL ---
+$history_logs = [];
+$history_member_name = "";
+$show_history_modal = false;
+
+if (isset($_GET['history_id'])) {
+    $hid = $_GET['history_id'];
+    $show_history_modal = true;
+
+    // 1. Get Name
+    $stmtName = $pdo->prepare("SELECT customer_name FROM bookings WHERE booking_id = ?");
+    $stmtName->execute([$hid]);
+    $resName = $stmtName->fetch();
+    $history_member_name = $resName ? $resName['customer_name'] : "Unknown";
+
+    // 2. Get Logs (Assuming table 'pass_visits' exists)
+    try {
+        $stmtLog = $pdo->prepare("SELECT * FROM pass_visits WHERE booking_id = ? ORDER BY visit_date DESC");
+        $stmtLog->execute([$hid]);
+        $history_logs = $stmtLog->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        $history_logs = []; 
+    }
+}
+?>
+<?php if($showStaffModal && $selectedStaff): ?>
+<div class="modal-overlay">
+    <div class="modal-box" style="max-width:760px;">
+        <a href="?view=stafflogs" class="modal-close">&times;</a>
+
+        <h3 style="margin-top:0; color:#003B72;">
+            <i class="fas fa-user-clock"></i>
+            Logs: <?php echo htmlspecialchars($selectedStaff['full_name'] ?: $selectedStaff['username']); ?>
+            <span style="font-size:0.85rem; color:#666;">(@<?php echo htmlspecialchars($selectedStaff['username']); ?>)</span>
+        </h3>
+
+        <form method="GET" style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:15px;">
+            <input type="hidden" name="view" value="stafflogs">
+            <input type="hidden" name="staff_id" value="<?php echo (int)$selectedStaff['admin_id']; ?>">
+
+            <div class="form-control">
+                <label>From</label>
+                <input type="date" name="st_start" value="<?php echo htmlspecialchars($stStart); ?>" required>
+            </div>
+            <div class="form-control">
+                <label>To</label>
+                <input type="date" name="st_end" value="<?php echo htmlspecialchars($stEnd); ?>" required>
+            </div>
+
+            <button type="submit" class="btn-filter"><i class="fas fa-filter"></i> Filter</button>
+        </form>
+
+        <div class="stats-row" style="margin-bottom:15px;">
+            <div class="card blue"><div class="card-info"><h3><?php echo $staffStats['login']; ?></h3><p>Logins</p></div><div class="card-icon"><i class="fas fa-sign-in-alt"></i></div></div>
+            <div class="card orange"><div class="card-info"><h3><?php echo $staffStats['logout']; ?></h3><p>Logouts</p></div><div class="card-icon"><i class="fas fa-sign-out-alt"></i></div></div>
+            <div class="card" style="border-left-color:#dc3545;"><div class="card-info"><h3><?php echo $staffStats['failed']; ?></h3><p>Failed</p></div><div class="card-icon" style="color:#dc3545;"><i class="fas fa-ban"></i></div></div>
+        </div>
+
+        <div style="max-height:360px; overflow:auto; border:1px solid #eee; border-radius:10px;">
+            <table style="margin:0;">
+                <thead>
+                    <tr>
+                        <th>Action</th>
+                        <th>Date & Time</th>
+                        <th>IP</th>
+                        <th>Device</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php if(count($staffLogs)>0): ?>
+                        <?php foreach($staffLogs as $lg): ?>
+                            <tr>
+                                <td style="font-weight:900;">
+                                    <?php
+                                        $act = $lg['action'];
+                                        $badgeClass = 'bg-active';
+                                        if ($act === 'LOGOUT') $badgeClass = 'bg-expired';
+                                        if ($act === 'FAILED_LOGIN') $badgeClass = 'bg-redeemed';
+                                    ?>
+                                    <span class="badge <?php echo $badgeClass; ?>">
+                                        <?php echo htmlspecialchars($act); ?>
+                                    </span>
+                                </td>
+                                <td><?php echo date("M d, Y h:i A", strtotime($lg['created_at'])); ?></td>
+                                <td><?php echo htmlspecialchars($lg['ip_address'] ?? '-'); ?></td>
+                                <td style="font-size:0.85rem; color:#666;">
+                                    <?php 
+                                        $ua = $lg['user_agent'] ?? '';
+                                        echo htmlspecialchars($ua ? (strlen($ua)>40 ? substr($ua,0,40).'...' : $ua) : '-');
+                                    ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <tr><td colspan="4" style="text-align:center; padding:20px; color:#999;">No logs found.</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+
+    </div>
+</div>
+<?php endif; ?>
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Admin Dashboard - Ajman Water Park</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        /* --- GENERAL STYLES --- */
+        body { font-family: 'Montserrat', 'Segoe UI', sans-serif; background: #f0f2f5; margin: 0; display: flex; color:#333; }
+        .sidebar { width: 260px; background: #003B72; color: white; min-height: 100vh; position: fixed; display: flex; flex-direction: column; }
+        .brand { padding: 30px 20px; text-align: center; font-size: 1.5rem; font-weight: bold; border-bottom: 1px solid rgba(255,255,255,0.1); background: #002e5b; }
+        .user-panel { padding: 20px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.1); background: #003566; }
+        .nav-links { padding: 20px 0; flex: 1; }
+        .nav-item { display: block; padding: 15px 25px; color: rgba(255,255,255,0.8); text-decoration: none; transition: 0.3s; font-size: 1.05rem; display: flex; align-items: center; gap: 15px; }
+        .nav-item:hover, .nav-item.active { background: rgba(255,255,255,0.1); color: white; border-left: 4px solid #4facfe; }
+        
+        .main { margin-left: 260px; padding: 30px; width: 100%; }
+        
+        /* --- BUTTONS --- */
+        .action-btn-group { display: flex; gap: 5px; flex-wrap: wrap; }
+        .btn-action { text-decoration: none; padding: 6px 10px; border-radius: 5px; font-size: 0.8rem; color: white; display: inline-flex; align-items: center; gap: 5px; transition: 0.2s; }
+        .btn-view { background-color: #17a2b8; }
+        .btn-view:hover { background-color: #138496; }
+        .btn-dl { background-color: #28a745; }
+        .btn-dl:hover { background-color: #218838; }
+        .btn-resend { background-color: #003B72; }
+        .btn-resend:hover { background-color: #00274d; }
+        .btn-history { background-color: #6f42c1; } /* Purple for history */
+        .btn-history:hover { background-color: #5a32a3; }
+
+        /* NEW: Add-on history button */
+        .btn-addon { background-color: #ff7a00; }
+        .btn-addon:hover { background-color: #e86f00; }
+
+        /* --- CARDS & TABLES --- */
+        .filter-section, .stats-row, .chart-section, .table-section, .discount-form-card { margin-bottom: 30px; }
+        .filter-section { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end; justify-content: space-between; }
+        .date-group { display: flex; gap: 15px; align-items: flex-end; }
+        .form-control { display: flex; flex-direction: column; gap: 5px; }
+        .form-control label { font-size: 0.85rem; font-weight: bold; color: #555; }
+        .form-control input, .form-control select { padding: 10px; border: 1px solid #ddd; border-radius: 6px; }
+        .btn-filter { background: #003B72; color: white; border: none; padding: 11px 25px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .quick-links a { font-size: 0.9rem; color: #003B72; text-decoration: none; margin-left: 10px; border: 1px solid #003B72; padding: 5px 10px; border-radius: 20px; transition:0.2s; }
+        .quick-links a:hover { background: #003B72; color: white; }
+
+        .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); display: flex; justify-content: space-between; align-items: center; border-left: 5px solid transparent; position: relative; }
+        .card.blue { border-left-color: #4facfe; }
+        .card.orange { border-left-color: #fa709a; }
+        .card.green { border-left-color: #43e97b; }
+        .card-info h3 { margin: 0; font-size: 1.8rem; color: #333; }
+        .card-icon { font-size: 2.5rem; opacity: 0.15; }
+
+        .table-section, .discount-form-card, .chart-section { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        thead { background: #f8f9fa; border-bottom: 2px solid #eee; }
+        th { text-align: left; padding: 15px; color: #555; font-size: 0.85rem; text-transform: uppercase; }
+        td { padding: 15px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; font-size: 0.95rem; color: #333; }
+        
+        .badge-user { font-weight: bold; color: #003B72; }
+        .badge-time { display: block; font-size: 0.75rem; color: #999; margin-top: 2px; }
+        
+        .pass-badge { padding: 5px 10px; border-radius: 20px; font-weight: bold; font-size: 0.8rem; text-transform: uppercase; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .pass-silver { background: linear-gradient(135deg, #e0e0e0, #ffffff); color: #555; border: 1px solid #ccc; }
+        .pass-gold { background: linear-gradient(135deg, #FFD700, #fff8b5); color: #9a7d0a; border: 1px solid #e6c200; }
+        .pass-platinum { background: linear-gradient(135deg, #e0f7fa, #ffffff); color: #006064; border: 1px solid #b2ebf2; }
+
+        .page-tabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #ddd; padding-bottom: 10px; }
+        .tab-btn { padding: 10px 20px; border: none; background: transparent; font-size: 1rem; font-weight: bold; color: #666; cursor: pointer; border-bottom: 3px solid transparent; transition: 0.2s; }
+        .tab-btn:hover { color: #003B72; }
+        .tab-btn.active-tab { color: #003B72; border-bottom-color: #003B72; }
+        .tab-content { display: none; }
+        .tab-content.active-content { display: block; animation: fadeIn 0.3s; }
+        .tab-content.active-content { display: block; animation: fadeIn 0.3s; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+        .input-group-d { margin-bottom: 15px; display:flex; flex-direction:column; }
+        .input-group-d label { margin-bottom: 5px; font-weight: bold; font-size: 0.9rem; color:#555; }
+        .input-group-d input, .input-group-d select { padding: 10px; border: 1px solid #ddd; border-radius: 6px; }
+        .btn-create { background: #003B72; color: white; border: none; padding: 12px 25px; border-radius: 6px; cursor: pointer; font-weight: bold; transition:0.2s;}
+        
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; }
+        .bg-active { background: #d4edda; color: #155724; }
+        .bg-expired { background: #f8d7da; color: #721c24; }
+        .bg-redeemed { background: #6c757d; color: white; text-decoration: line-through; }
+        .msg-box { padding:15px; margin-bottom:20px; border-radius:8px; font-weight:bold; }
+        .bg-success { background: #d4edda; color: #155724; }
+        .bg-error { background: #f8d7da; color: #721c24; }
+
+        /* --- MODAL STYLES --- */
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); z-index: 1000;
+            display: flex; justify-content: center; align-items: center;
+        }
+        .modal-box {
+            background: white; width: 90%; max-width: 520px; padding: 25px;
+            border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            animation: slideDown 0.3s ease; position: relative;
+        }
+        @keyframes slideDown { from { transform: translateY(-50px); opacity:0; } to { transform: translateY(0); opacity:1; } }
+        .modal-close { position: absolute; top: 15px; right: 15px; text-decoration: none; font-size: 1.5rem; color: #888; }
+        .history-list { list-style: none; padding: 0; margin-top: 15px; max-height: 300px; overflow-y: auto; }
+        .history-item { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; font-size: 0.9rem; gap:10px; }
+        .history-item:last-child { border-bottom: none; }
+        .history-count { background: #003B72; color: white; padding: 15px; border-radius: 8px; text-align: center; margin-bottom: 15px; }
+        .history-count strong { font-size: 1.8rem; display: block; }
+
+        /* small chip for BASE/TOPUP */
+        .chip {
+            display:inline-block;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 800;
+            background: #fff3e0;
+            color: #c25a00;
+            border: 1px solid #ffd2a8;
+            margin-left: 6px;
+        }
+
+        /* --- LIVE STATUS INDICATOR --- */
+        .status-indicator {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            background: rgba(0,0,0,0.05);
+            padding: 4px 10px;
+            border-radius: 20px;
+        }
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .dot-online { 
+            background-color: #28a745; 
+            box-shadow: 0 0 5px #28a745; 
+            animation: pulse 2s infinite;
+        }
+        .dot-offline { 
+            background-color: #ccc; 
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(40, 167, 69, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0); }
+        }
+
+        /* LIVE DOT ANIMATION FOR MONITOR */
+        .live-dot {
+            width: 12px;
+            height: 12px;
+            background-color: #ff4444;
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 0 0 rgba(255, 68, 68, 0.7);
+            animation: pulse-red 2s infinite;
+        }
+
+        @keyframes pulse-red {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(255, 68, 68, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(255, 68, 68, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(255, 68, 68, 0); }
+        }
+    </style>
+</head>
+<body>
+
+    <?php if($show_history_modal): ?>
+    <div class="modal-overlay">
+        <div class="modal-box">
+            <a href="?view=members" class="modal-close">&times;</a>
+            <h3 style="margin-top:0; color:#003B72;"><i class="fas fa-history"></i> Visit Log</h3>
+            <p style="color:#666; margin-bottom:15px;">Member: <strong><?php echo htmlspecialchars($history_member_name); ?></strong></p>
+            
+            <div class="history-count">
+                <strong><?php echo count($history_logs); ?></strong>
+                Total Visits
+            </div>
+
+            <h4 style="margin-bottom:10px; font-size:0.9rem; color:#555;">Detailed Logs:</h4>
+            <ul class="history-list">
+                <?php if(count($history_logs) > 0): ?>
+                    <?php foreach($history_logs as $log): ?>
+                    <li class="history-item">
+                        <span><i class="fas fa-calendar-check" style="color:#28a745;"></i> <?php echo date("F d, Y", strtotime($log['visit_date'])); ?></span>
+                        <span style="color:#888;"><?php echo date("h:i A", strtotime($log['visit_date'])); ?></span>
+                    </li>
+                    <?php endforeach; ?>
+                <?php else: ?>
+                    <li class="history-item" style="justify-content:center; color:#999;">No visits recorded yet.</li>
+                <?php endif; ?>
+            </ul>
+        </div>
+    </div>
+    <?php endif; ?>
+
+
+    <?php if($show_addon_history_modal): ?>
+    <div class="modal-overlay">
+        <div class="modal-box">
+            <a href="?view=sales" class="modal-close">&times;</a>
+            <h3 style="margin-top:0; color:#003B72;"><i class="fas fa-cart-plus"></i> Add-on Purchase History</h3>
+
+            <?php if($addon_history_booking): ?>
+                <p style="color:#666; margin-bottom:12px; line-height:1.5;">
+                    Booking: <strong>#<?php echo str_pad((int)$addon_history_booking['booking_id'], 6, '0', STR_PAD_LEFT); ?></strong><br>
+                    Customer: <strong><?php echo htmlspecialchars($addon_history_booking['customer_name']); ?></strong><br>
+                    Main Paid: <strong><?php echo date("M d, Y h:i A", strtotime($addon_history_booking['created_at'])); ?></strong>
+                </p>
+            <?php endif; ?>
+
+            <?php if(!$addonLogsEnabled): ?>
+                <div class="msg-box bg-error">
+                    Add-on logging table not found (<code>addon_purchase_logs</code>).<br>
+                    Create that table and add logging in your top-up success code to record purchase time.
+                </div>
+            <?php else: ?>
+
+                <div class="history-count" style="background:#ff7a00;">
+                    <strong><?php echo count($addon_history_logs); ?></strong>
+                    Top-up Purchases Logged
+                </div>
+
+                <h4 style="margin-bottom:10px; font-size:0.9rem; color:#555;">Timeline:</h4>
+
+                <ul class="history-list">
+                    <li class="history-item">
+                        <span>
+                            <strong>Main Booking</strong> <span class="chip">BASE</span><br>
+                            <span style="color:#666; font-size:0.85rem;">Original purchase (booking created_at)</span>
+                        </span>
+                        <span style="color:#888;">
+                            <?php echo $addon_history_booking ? date("h:i A", strtotime($addon_history_booking['created_at'])) : '-'; ?>
+                        </span>
+                    </li>
+
+                    <?php if(count($addon_history_logs) > 0): ?>
+                        <?php foreach($addon_history_logs as $log): ?>
+                            <li class="history-item">
+                                <span>
+                                    <strong>Top-up Add-ons</strong> <span class="chip">TOPUP</span><br>
+                                    <?php if(!empty($log['items_summary'])): ?>
+                                        <span style="color:#666; font-size:0.85rem;"><?php echo htmlspecialchars($log['items_summary']); ?></span><br>
+                                    <?php endif; ?>
+
+                                    <span style="font-size:0.85rem; color:#333;">
+                                        Amount: <strong>AED <?php echo number_format((float)$log['total_amount'], 2); ?></strong>
+                                        <?php if(!empty($log['payment_method'])): ?>
+                                            • Method: <strong><?php echo strtoupper(htmlspecialchars($log['payment_method'])); ?></strong>
+                                        <?php endif; ?>
+                                    </span>
+
+                                    <?php if(!empty($log['created_by'])): ?>
+                                        <div style="font-size:0.8rem; color:#888;">By: <?php echo htmlspecialchars($log['created_by']); ?></div>
+                                    <?php endif; ?>
+                                </span>
+                                <span style="color:#888;">
+                                    <?php echo date("M d, Y", strtotime($log['created_at'])); ?><br>
+                                    <?php echo date("h:i A", strtotime($log['created_at'])); ?>
+                                </span>
+                            </li>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <li class="history-item" style="justify-content:center; color:#999;">No top-up add-on purchases found.</li>
+                    <?php endif; ?>
+                </ul>
+
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
+
+
+    <div class="sidebar">
+        <div class="brand"><i class="fas fa-water"></i> Ajman Water Park</div>
+        
+        <div class="user-panel">
+            <div style="font-size: 0.85rem; color: #a6cfff;">Welcome,</div>
+            <div style="font-weight: bold; font-size: 1.1rem;"><?php echo htmlspecialchars($_SESSION['admin_fullname']); ?></div>
+            <div style="font-size: 0.75rem; background: rgba(0,0,0,0.2); display: inline-block; padding: 2px 8px; border-radius: 10px; margin-top: 5px;">ADMIN BOSS</div>
+        </div>
+
+        <div class="nav-links">
+            <a href="?view=sales" class="nav-item <?php echo $active_tab == 'sales' ? 'active' : ''; ?>"><i class="fas fa-tachometer-alt"></i> Dashboard</a>
+            <a href="?view=members" class="nav-item <?php echo $active_tab == 'members' ? 'active' : ''; ?>"><i class="fas fa-id-card"></i> Members</a>
+            <a href="?view=discounts" class="nav-item <?php echo $active_tab == 'discounts' ? 'active' : ''; ?>"><i class="fas fa-tags"></i> Discount Codes</a>
+            <a href="?view=scanners" class="nav-item <?php echo $active_tab == 'scanners' ? 'active' : ''; ?>"><i class="fas fa-qrcode"></i> Scanner Logs</a>
+            <a href="?view=stafflogs" class="nav-item <?php echo $active_tab == 'stafflogs' ? 'active' : ''; ?>"><i class="fas fa-users-cog"></i> Staff Logs</a>
+            <a href="?view=visits" class="nav-item <?php echo $active_tab == 'visits' ? 'active' : ''; ?>"><i class="fas fa-history"></i> Visitor History</a>
+        </div>
+        
+        <a href="admin_logout.php" class="nav-item" style="color: #ff6b6b; margin-top: auto; border-top: 1px solid rgba(255,255,255,0.1);">
+            <i class="fas fa-sign-out-alt"></i> Logout
+        </a>
+    </div>
+
+    <div class="main">
+        
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="color: #003B72; margin: 0;">Admin Control Panel</h2>
+        </div>
+
+        <div class="page-tabs">
+            <button class="tab-btn <?php echo $active_tab == 'sales' ? 'active-tab' : ''; ?>" onclick="switchTab('sales')">
+                <i class="fas fa-chart-line"></i> Sales Analytics
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'members' ? 'active-tab' : ''; ?>" onclick="switchTab('members')">
+                <i class="fas fa-id-card"></i> Members List
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'discounts' ? 'active-tab' : ''; ?>" onclick="switchTab('discounts')">
+                <i class="fas fa-ticket-alt"></i> Discount Codes
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'scanners' ? 'active-tab' : ''; ?>" onclick="switchTab('scanners')">
+                <i class="fas fa-qrcode"></i> Scanner Logs
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'stafflogs' ? 'active-tab' : ''; ?>" onclick="switchTab('stafflogs')">
+                <i class="fas fa-users-cog"></i> Staff Logs
+            </button>
+            <button class="tab-btn <?php echo $active_tab == 'visits' ? 'active-tab' : ''; ?>" onclick="switchTab('visits')">
+                <i class="fas fa-history"></i> History
+            </button>
+        </div>
+
+        <div class="filter-section" style="background: linear-gradient(135deg, #003B72 0%, #00509d 100%); color: white;">
+            <div style="flex: 1;">
+                <h3 style="margin:0; color:white; display:flex; align-items:center; gap:10px;">
+                    <i class="fas fa-users"></i> LIVE CROWD MONITOR
+                    <span class="live-dot"></span> </h3>
+                <p style="margin:5px 0 0; opacity:0.8; font-size:0.9rem;">
+                    Actual entries recorded for today (<?php echo date('F d, Y'); ?>)
+                </p>
+            </div>
+            
+            <div style="text-align: center; border-left: 1px solid rgba(255,255,255,0.3); border-right: 1px solid rgba(255,255,255,0.3); padding: 0 20px; margin: 0 20px;">
+                <div style="font-size: 2.8rem; font-weight: 800; line-height:1; color: #ffeb3b;"><?php echo number_format($expected_pax_today); ?></div>
+                <div style="font-size: 0.85rem; opacity: 0.9; font-weight: bold;">EXPECTED TODAY</div>
+            </div>
+
+            <div style="text-align: right; margin-right: 30px;">
+                <div style="font-size: 3rem; font-weight: 800; line-height:1;"><?php echo number_format($live_pax_today); ?></div>
+                <div style="font-size: 0.9rem; opacity: 0.9;">PEOPLE INSIDE</div>
+            </div>
+
+            <div style="text-align: right; border-left: 1px solid rgba(255,255,255,0.3); padding-left: 20px; margin-right: 20px;">
+                <div style="font-size: 1.5rem; font-weight: 700;"><?php echo number_format($total_pax_month); ?></div>
+                <div style="font-size: 0.8rem; opacity: 0.8;">VISITORS THIS MONTH</div>
+            </div>
+            
+            <div style="text-align: right; border-left: 1px solid rgba(255,255,255,0.3); padding-left: 20px;">
+                <div style="font-size: 1.5rem; font-weight: 700;"><?php echo number_format($total_pax_year); ?></div>
+                <div style="font-size: 0.8rem; opacity: 0.8;">TOTAL VISITORS (<?php echo date('Y'); ?>)</div>
+            </div>
+        </div>
+
+        <div id="view-sales" class="tab-content <?php echo $active_tab == 'sales' ? 'active-content' : ''; ?>">
+            
+            <h4 style="color:#003B72; margin-top:20px;"><i class="fas fa-calendar-alt"></i> Upcoming Arrivals (Next 7 Days)</h4>
+            <div class="stats-row" style="margin-bottom: 30px;">
+                <?php if(!empty($upcomingData)): foreach($upcomingData as $row): ?>
+                    <div class="card" style="border-left: 5px solid #ff9800; min-width: 140px;">
+                        <div class="card-info">
+                            <h3 style="font-size:1.5rem; color:#ff9800;"><?php echo $row['pax']; ?></h3>
+                            <p style="text-transform: uppercase; font-size:0.75rem; font-weight:bold; color:#666;">
+                                <?php echo date('M d (D)', strtotime($row['schedule_date'])); ?>
+                            </p>
+                        </div>
+                        <div class="card-icon" style="font-size:1.5rem; color:#ff9800; opacity:0.3;"><i class="fas fa-clock"></i></div>
+                    </div>
+                <?php endforeach; else: ?>
+                    <div style="color:#999; font-style:italic;">No upcoming bookings found for the next 7 days.</div>
+                <?php endif; ?>
+            </div>
+
+            <h4 style="color:#003B72; margin-top:20px;">Daily Demographic Breakdown</h4>
+            <div class="stats-row" style="margin-bottom: 30px;">
+                <?php if(!empty($demoData)): ?>
+                    <?php foreach($demoData as $type => $count): ?>
+                        <div class="card" style="border-left: 5px solid #17a2b8; min-width: 150px;">
+                            <div class="card-info">
+                                <h3 style="font-size:1.5rem;"><?php echo $count; ?></h3>
+                                <p style="text-transform: uppercase; font-size:0.8rem; font-weight:bold; color:#666;">
+                                    <?php echo htmlspecialchars($type); ?>
+                                </p>
+                            </div>
+                            <div class="card-icon" style="font-size:1.5rem; color:#17a2b8;">
+                                <?php 
+                                    // Simple icon logic based on name
+                                    $lname = strtolower($type);
+                                    if(strpos($lname, 'child') !== false || strpos($lname, 'kid') !== false || strpos($lname, 'bata') !== false) echo '<i class="fas fa-child"></i>';
+                                    elseif(strpos($lname, 'baby') !== false || strpos($lname, 'infant') !== false) echo '<i class="fas fa-baby"></i>';
+                                    elseif(strpos($lname, 'senior') !== false) echo '<i class="fas fa-blind"></i>';
+                                    else echo '<i class="fas fa-user"></i>';
+                                ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                <?php else: ?>
+                    <div style="color:#999; font-style:italic;">No entries yet today.</div>
+                <?php endif; ?>
+            </div>
+
+            <div class="filter-section">
+                <form method="GET" style="display: flex; gap: 20px; align-items: flex-end; flex-wrap: wrap;">
+                    <input type="hidden" name="view" value="sales">
+                    <div class="date-group">
+                        <div class="form-control">
+                            <label>From:</label>
+                            <input type="date" name="start_date" value="<?php echo $start_date; ?>" required>
+                        </div>
+                        <div class="form-control">
+                            <label>To:</label>
+                            <input type="date" name="end_date" value="<?php echo $end_date; ?>" required>
+                        </div>
+                        <button type="submit" class="btn-filter"><i class="fas fa-filter"></i> Filter</button>
+                    </div>
+                </form>
+
+                <div class="quick-links">
+                    <span style="font-size:0.85rem; font-weight:bold; color:#555;">Quick View:</span>
+                    <a href="?view=sales&start_date=<?php echo date('Y-m-d'); ?>&end_date=<?php echo date('Y-m-d'); ?>">Today</a>
+                    <a href="?view=sales&start_date=<?php echo date('Y-m-01'); ?>&end_date=<?php echo date('Y-m-d'); ?>">This Month</a>
+                </div>
+            </div>
+
+            <div class="stats-row">
+                <div class="card blue">
+                    <div class="card-info">
+                        <h3>AED <?php echo number_format($periodRevenue, 2); ?></h3>
+                        <p>Total Revenue</p>
+                    </div>
+                    <div class="card-icon" style="color:#4facfe;"><i class="fas fa-wallet"></i></div>
+                </div>
+                
+                <div class="card orange">
+                    <div class="card-info">
+                        <h3><?php echo number_format($periodBookings); ?></h3>
+                        <p>Transactions</p>
+                    </div>
+                    <div class="card-icon" style="color:#fa709a;"><i class="fas fa-receipt"></i></div>
+                </div>
+
+                <div class="card green">
+                    <div class="card-info">
+                        <h3><?php echo number_format($totalTicketsSold); ?></h3>
+                        <p>Tickets Sold</p>
+                    </div>
+                    <div class="card-icon" style="color:#43e97b;"><i class="fas fa-ticket-alt"></i></div>
+                </div>
+            </div>
+
+            <div class="chart-section">
+                <h3 style="margin-top: 0; color: #003B72; font-size: 1.1rem;">Sales Trend</h3>
+                <canvas id="salesChart" height="80"></canvas>
+            </div>
+
+            <div class="table-section">
+                <h3 style="margin-top: 0; color: #003B72; font-size: 1.1rem; margin-bottom: 15px;">Transaction History</h3>
+                <?php if(count($transactions) > 0): ?>
+                <table>
+                    <thead>
+                        <tr>
+                            <th width="10%">ID</th>
+                            <th width="20%">Customer Name</th>
+                            <th width="30%">Package Items</th>
+                            <th width="15%">Paid Date</th>
+                            <th width="10%">Amount</th>
+                            <th width="15%">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach($transactions as $t): ?>
+                        <tr>
+                            <td>
+                                <span style="background:#e3f2fd; color:#0d47a1; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:0.85rem;">
+                                    #<?php echo str_pad($t['booking_id'], 6, '0', STR_PAD_LEFT); ?>
+                                </span>
+                            </td>
+                            <td style="font-weight: 600;"><?php echo htmlspecialchars($t['customer_name']); ?></td>
+                            <td style="color:#555; line-height: 1.5; font-size:0.9rem;">
+                                <?php echo $t['items_summary']; ?>
+                                <?php if(!empty($t['has_addons'])): ?>
+                                    <div style="margin-top:6px; font-size:0.82rem; font-weight:bold; color:#ff7a00;">
+                                        Add-ons: YES (x<?php echo (int)$t['addon_qty']; ?>)
+                                        <?php if(!empty($t['topup_count'])): ?>
+                                            • Top-ups: <?php echo (int)$t['topup_count']; ?>
+                                        <?php endif; ?>
+                                        <?php if(!empty($t['last_addon_purchase_at'])): ?>
+                                            <div style="margin-top:2px; color:#666; font-weight:600;">
+                                                Last Top-up: <?php echo date("M d, Y h:i A", strtotime($t['last_addon_purchase_at'])); ?>
+                                            </div>
+                                        <?php endif; ?>
+                                        <?php if(!$addonLogsEnabled): ?>
+                                            <div style="margin-top:2px; color:#b00020; font-weight:700;">
+                                                (No add-on time logs)
+                                            </div>
+                                        <?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </td>
+                            <td><?php echo date("M d, Y h:i A", strtotime($t['created_at'])); ?></td>
+                            <td style="font-weight:bold; color:#155724;">AED <?php echo number_format($t['total_amount'], 2); ?></td>
+                            
+                            <td>
+                                <div class="action-btn-group" style="margin-bottom:8px;">
+                                    <a href="?view=sales&addon_history_id=<?php echo (int)$t['booking_id']; ?>" class="btn-action btn-addon" title="View Add-on Purchase History">
+                                        <i class="fas fa-history"></i> Add-ons
+                                    </a>
+                                </div>
+
+                                <?php if($t['payment_status'] == 'pending'): ?>
+                                    <form method="POST" action="admin_mark_paid.php" style="display:inline;">
+                                        <input type="hidden" name="booking_id" value="<?php echo $t['booking_id']; ?>">
+                                        <button type="submit" style="background:#28a745; color:white; border:none; padding:6px 12px; border-radius:5px; cursor:pointer; font-weight:bold; font-size:0.85rem;" onclick="return confirm('Confirm payment received for #<?php echo $t['booking_id']; ?>?');">
+                                            <i class="fas fa-money-bill"></i> Accept Cash
+                                        </button>
+                                    </form>
+                                <?php else: ?>
+                                    <?php if($t['is_redeemed']): ?>
+                                        <span class="badge-user"><i class="fas fa-user-check"></i> <?php echo htmlspecialchars($t['redeemed_by']); ?></span>
+                                        <span class="badge-time"><?php echo date("M d, h:i A", strtotime($t['redeemed_at'])); ?></span>
+                                    <?php else: ?>
+                                        <span style="color:#999; font-style:italic; font-size:0.85rem;">(Paid, Unclaimed)</span>
+                                    <?php endif; ?>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <?php else: ?>
+                    <div style="text-align:center; padding: 40px; color:#999;">No transactions found.</div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <div id="view-members" class="tab-content <?php echo $active_tab == 'members' ? 'active-content' : ''; ?>">
+            
+            <div class="stats-row">
+                <div class="card" style="border-left-color: #003B72;">
+                    <div class="card-info">
+                        <h3><?php echo count($members); ?></h3>
+                        <p>Total Active Members</p>
+                    </div>
+                    <div class="card-icon" style="color:#003B72;"><i class="fas fa-users"></i></div>
+                </div>
+            </div>
+
+            <div class="table-section">
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 15px;">
+                    <h3 style="margin: 0; color: #003B72; font-size: 1.1rem;">Annual Pass Members</h3>
+                    
+                    <div style="display:flex; gap:5px;">
+                        <input type="text" id="memberSearchInput" onkeyup="searchMembers()" 
+                            placeholder="Type to search (Name, Email)..." 
+                            style="padding:10px; width: 250px; border:1px solid #003B72; border-radius:50px; font-size:0.9rem; padding-left:15px; outline:none;">
+                    </div>
+                </div>
+                
+                <?php if(isset($_GET['msg'])): ?>
+                    <div class="msg-box bg-success"><i class="fas fa-check-circle"></i> <?php echo htmlspecialchars($_GET['msg']); ?></div>
+                <?php endif; ?>
+                <?php if(isset($_GET['error'])): ?>
+                    <div class="msg-box bg-error"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($_GET['error']); ?></div>
+                <?php endif; ?>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Photo</th>
+                            <th>Member Name</th>
+                            <th>Contact Info</th>
+                            <th>Pass Type</th>
+                            <th>Valid Until</th>
+                            <th>Status</th>
+                            <th width="250">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="membersTableBody">
+                        <?php if(count($members) > 0): ?>
+                            <?php foreach($members as $m): 
+                                $passClass = 'pass-silver';
+                                $pid = $m['product_id'];
+                                if($pid == 'AP2') $passClass = 'pass-gold';
+                                if($pid == 'AP3') $passClass = 'pass-platinum';
+
+                                $expiry = strtotime($m['expiry_date']);
+                                $isActive = $expiry >= time();
+                            ?>
+                            <tr>
+                                <td>
+                                    <?php if(!empty($m['face_image_path'])): ?>
+                                        <img src="uploads/faces/<?php echo htmlspecialchars($m['face_image_path']); ?>" style="width:40px; height:40px; border-radius:50%; object-fit:cover; border:2px solid #28a745;">
+                                    <?php else: ?>
+                                        <span style="color:#ccc; font-size:1.5rem;"><i class="fas fa-user-circle"></i></span>
+                                    <?php endif; ?>
+                                </td>
+                                
+                                <td style="font-weight:bold; font-size:1rem; color:#003B72;">
+                                    <?php echo htmlspecialchars($m['customer_name']); ?>
+                                </td>
+                                <td>
+                                    <div style="font-size:0.9rem;"><i class="fas fa-envelope"></i> <?php echo htmlspecialchars($m['customer_email']); ?></div>
+                                    <div style="font-size:0.85rem; color:#666; margin-top:3px;"><i class="fas fa-phone"></i> <?php echo htmlspecialchars($m['customer_phone']); ?></div>
+                                </td>
+                                <td>
+                                    <span class="pass-badge <?php echo $passClass; ?>">
+                                        <?php echo htmlspecialchars($m['pass_name']); ?>
+                                    </span>
+                                </td>
+                                <td style="font-weight:bold;">
+                                    <?php echo date("F d, Y", strtotime($m['expiry_date'])); ?>
+                                </td>
+                                <td>
+                                    <?php if($isActive): ?>
+                                        <span class="badge bg-active">Active</span>
+                                    <?php else: ?>
+                                        <span class="badge bg-expired">Expired</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <div class="action-btn-group">
+                                        
+                                        <a href="?view=members&history_id=<?php echo $m['booking_id']; ?>" class="btn-action btn-history" title="View Visit History">
+                                            <i class="fas fa-history"></i> Log
+                                        </a>
+
+                                        <a href="view_pass.php?booking_id=<?php echo $m['booking_id']; ?>&action=view" target="_blank" class="btn-action btn-view" title="View Pass">
+                                            <i class="fas fa-eye"></i> View
+                                        </a>
+
+                                        <a href="view_pass.php?booking_id=<?php echo $m['booking_id']; ?>&action=download" class="btn-action btn-dl" title="Download Pass">
+                                            <i class="fas fa-download"></i> DL
+                                        </a>
+
+                                        <a href="?view=members&action=resend&booking_id=<?php echo $m['booking_id']; ?>" 
+                                        onclick="return confirm('Resend Annual Pass email to <?php echo $m['customer_email']; ?>?');"
+                                        class="btn-action btn-resend" title="Resend Email">
+                                            <i class="fas fa-paper-plane"></i>
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr><td colspan="7" style="text-align:center; padding:30px; color:#999;">No Annual Pass members found.</td></tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="view-discounts" class="tab-content <?php echo $active_tab == 'discounts' ? 'active-content' : ''; ?>">
+            
+            <?php if(!empty($msg_discount)): ?>
+                <div class="msg-box <?php echo ($msg_type == 'success') ? 'bg-success' : 'bg-error'; ?>">
+                    <?php echo $msg_discount; ?>
+                </div>
+            <?php endif; ?>
+
+            <div class="discount-form-card">
+                <h3 style="color:#003B72; border-bottom:1px solid #eee; padding-bottom:10px; margin-top:0;">
+                    <i class="fas fa-plus-circle"></i> Generate New Discount Code
+                </h3>
+                
+                <form method="POST" action="?view=discounts">
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:20px;">
+                        
+                        <div class="input-group-d">
+                            <label>Assign to Agent / Name</label>
+                            <input type="text" name="agent_name" placeholder="Ex: Rainier Pinol" required>
+                        </div>
+
+                        <div class="input-group-d">
+                            <label>Discount Percentage (%)</label>
+                            <input type="number" name="discount_value" placeholder="Ex: 10" min="1" max="100" required>
+                        </div>
+
+                        <div class="input-group-d">
+                            <label>Usage Limit (Default: 1 Time)</label>
+                            <input type="number" name="usage_limit" value="1" min="1" required>
+                        </div>
+
+                        <div class="input-group-d">
+                            <label>Duration (Days)</label>
+                            <input type="number" name="duration" placeholder="Ex: 30" value="30" required>
+                        </div>
+
+                        <div class="input-group-d">
+                            <label>Custom Code (Optional)</label>
+                            <input type="text" name="custom_code" placeholder="Leave empty to auto-generate">
+                        </div>
+                    </div>
+                    
+                    <button type="submit" name="create_code" class="btn-create" style="margin-top:15px;">
+                        Create Code
+                    </button>
+                </form>
+            </div>
+
+            <div class="table-section">
+                <h3 style="margin-top: 0; color: #003B72; font-size: 1.1rem; margin-bottom: 15px;">Existing Discount Codes</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Code</th>
+                            <th>Assigned Agent</th>
+                            <th>Discount</th>
+                            <th>Usage (Used/Limit)</th> <th>Valid Until</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if(count($allCodes) > 0): ?>
+                            <?php foreach($allCodes as $c): 
+                                $is_expired = strtotime($c['end_date']) < time();
+                                $is_redeemed = ($c['usage_count'] >= $c['usage_limit']);
+                            ?>
+                            <tr>
+                                <td style="font-weight:bold; font-size:1.1rem; color:#003B72; letter-spacing:1px;"><?php echo $c['code']; ?></td>
+                                <td><?php echo htmlspecialchars($c['agent_name']); ?></td>
+                                <td><?php echo number_format($c['discount_value']); ?>% OFF</td>
+                                <td style="font-weight:bold;">
+                                    <?php echo $c['usage_count']; ?> / <?php echo $c['usage_limit']; ?>
+                                </td>
+                                <td><?php echo date("M d, Y", strtotime($c['end_date'])); ?></td>
+                                <td>
+                                    <?php if($is_redeemed): ?>
+                                        <span class="badge bg-redeemed">Redeemed</span>
+                                    <?php elseif($is_expired): ?>
+                                        <span class="badge bg-expired">Expired</span>
+                                    <?php else: ?>
+                                        <span class="badge bg-active">Active</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <a href="?delete_code=<?php echo $c['id']; ?>&view=discounts" style="color:#d9534f;" onclick="return confirm('Delete this code?');">
+                                        <i class="fas fa-trash"></i> Delete
+                                    </a>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr><td colspan="7" style="text-align:center; color:#999;">No discount codes found.</td></tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="view-scanners" class="tab-content <?php echo $active_tab == 'scanners' ? 'active-content' : ''; ?>">
+
+            <div class="filter-section">
+                <form method="GET" style="display:flex; gap:20px; align-items:flex-end; flex-wrap:wrap;">
+                    <input type="hidden" name="view" value="scanners">
+
+                    <div class="date-group">
+                        <div class="form-control">
+                            <label>From:</label>
+                            <input type="date" name="s_start" value="<?php echo htmlspecialchars($scannerStart); ?>" required>
+                        </div>
+                        <div class="form-control">
+                            <label>To:</label>
+                            <input type="date" name="s_end" value="<?php echo htmlspecialchars($scannerEnd); ?>" required>
+                        </div>
+                    </div>
+
+                    <div class="form-control">
+                        <label>Scanner (Add-on):</label>
+                        <select name="scanner_pid" style="padding:10px; border:1px solid #ddd; border-radius:6px;">
+                            <option value="ALL" <?php echo ($scannerFilter==='ALL')?'selected':''; ?>>All</option>
+                            <?php foreach($addonProducts as $ap): ?>
+                                <option value="<?php echo htmlspecialchars($ap['product_id']); ?>" <?php echo ($scannerFilter===strtoupper($ap['product_id']))?'selected':''; ?>>
+                                    <?php echo htmlspecialchars($ap['name']); ?> (<?php echo htmlspecialchars($ap['product_id']); ?>)
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+                    <button type="submit" class="btn-filter"><i class="fas fa-filter"></i> Filter</button>
+                </form>
+
+                <div class="quick-links">
+                    <span style="font-size:0.85rem; font-weight:bold; color:#555;">Quick View:</span>
+                    <a href="?view=scanners&s_start=<?php echo date('Y-m-d'); ?>&s_end=<?php echo date('Y-m-d'); ?>&scanner_pid=<?php echo urlencode($scannerFilter); ?>">Today</a>
+                </div>
+            </div>
+
+            <div class="table-section">
+                <h3 style="margin-top:0; color:#003B72; font-size:1.1rem;">Add-on Scanner Backtracking</h3>
+
+                <?php if(!$addonRedeemLogsEnabled): ?>
+                    <div class="msg-box bg-error">
+                        Missing table: <code>addon_redemption_logs</code>
+                    </div>
+                <?php else: ?>
+
+                    <?php if(count($scannerLogs) > 0): ?>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th width="10%">Booking</th>
+                                    <th width="20%">Add-on</th>
+                                    <th width="18%">Kiosk/Section</th>
+                                    <th width="18%">Scanned By</th>
+                                    <th width="14%">Qty Used</th>
+                                    <th width="20%">Date & Time</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach($scannerLogs as $log): ?>
+                                    <tr>
+                                        <td>
+                                            <span style="background:#e3f2fd; color:#0d47a1; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:0.85rem;">
+                                                #<?php echo str_pad((int)$log['booking_id'], 6, '0', STR_PAD_LEFT); ?>
+                                            </span>
+                                        </td>
+
+                                        <td style="font-weight:700;">
+                                            <?php echo htmlspecialchars($log['product_name'] ?: $log['product_id']); ?>
+                                            <div style="font-size:0.8rem; color:#777; margin-top:2px;">
+                                                Code: <?php echo htmlspecialchars($log['unique_code']); ?>
+                                            </div>
+                                        </td>
+
+                                        <td style="font-weight:600; color:#555;">
+                                            <?php echo htmlspecialchars($log['scanner_section'] ?: 'Unknown'); ?>
+                                        </td>
+
+                                        <td style="font-weight:800; color:#003B72;">
+                                            <?php echo htmlspecialchars($log['redeemed_by'] ?: 'Unknown'); ?>
+                                        </td>
+
+                                        <td style="font-weight:800; color:#155724;">
+                                            <?php echo (int)$log['quantity_used_after']; ?>
+                                            <div style="font-size:0.8rem; color:#777;">
+                                                Rem: <?php echo (int)$log['remaining_after']; ?>
+                                            </div>
+                                        </td>
+
+                                        <td>
+                                            <?php echo date("M d, Y h:i A", strtotime($log['redeemed_at'])); ?>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    <?php else: ?>
+                        <div style="text-align:center; padding: 40px; color:#999;">No scanner logs found for this range.</div>
+                    <?php endif; ?>
+
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <div id="view-stafflogs" class="tab-content <?php echo $active_tab == 'stafflogs' ? 'active-content' : ''; ?>">
+
+            <?php if(!empty($staffMsg)): ?>
+                <div class="msg-box <?php echo ($staffType==='success') ? 'bg-success' : 'bg-error'; ?>">
+                    <?php echo htmlspecialchars($staffMsg); ?>
+                </div>
+            <?php endif; ?>
+
+            <div class="table-section">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <h3 style="margin:0; color:#003B72;">Staff Directory & Status</h3>
+
+                    <input type="text" id="staffSearchInput" placeholder="Search staff name..."
+                        style="padding:10px; width:260px; border:1px solid #ddd; border-radius:50px; outline:none;"
+                        onkeyup="searchStaffCards()">
+                </div>
+
+                <div style="margin-top:25px; display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:20px;" id="staffCardsWrap">
+                    <?php foreach($staffList as $s): ?>
+                        <?php if($s['role'] === 'staff' || $s['role'] === 'guard'): 
+                            
+                            // --- STATUS LOGIC ---
+                            $isOnline = false;
+                            $statusText = "Offline";
+                            $lastSeen = "Never";
+                            
+                            if (!empty($s['last_active_at'])) {
+                                $diff = time() - strtotime($s['last_active_at']);
+                                if ($diff < 300) { // 5 minutes threshold
+                                    $isOnline = true;
+                                    $statusText = "Online";
+                                }
+                                $lastSeen = date("M d, h:i A", strtotime($s['last_active_at']));
+                            }
+                            
+                            $borderColor = $isOnline ? '#28a745' : '#ccc';
+                        ?>
+                        <a href="?view=stafflogs&staff_id=<?php echo (int)$s['admin_id']; ?>" 
+                        class="card" 
+                        style="text-decoration:none; border-left-color:<?php echo $borderColor; ?>; padding-top:35px;">
+                            
+                            <div class="status-indicator">
+                                <span class="dot <?php echo $isOnline ? 'dot-online' : 'dot-offline'; ?>"></span>
+                                <span style="color:<?php echo $isOnline ? '#28a745' : '#666'; ?>;">
+                                    <?php echo $statusText; ?>
+                                </span>
+                            </div>
+
+                            <div class="card-info">
+                                <h3 style="font-size:1.1rem; margin:0; color:#003B72;">
+                                    <?php echo htmlspecialchars($s['full_name'] ?: $s['username']); ?>
+                                </h3>
+                                <p style="margin:6px 0 0; color:#666; font-size:0.9rem;">
+                                    @<?php echo htmlspecialchars($s['username']); ?> • <strong><?php echo strtoupper($s['role']); ?></strong>
+                                </p>
+                                
+                                <div style="margin-top:12px; border-top:1px solid #eee; padding-top:10px; font-size:0.85rem; color:#555;">
+                                    <div style="margin-bottom:5px;">
+                                        <i class="fas fa-map-marker-alt" style="color:#d9534f; width:15px;"></i> 
+                                        <strong><?php echo htmlspecialchars($s['current_location'] ?: 'Not Assigned'); ?></strong>
+                                    </div>
+                                    <div style="margin-bottom:5px;">
+                                        <i class="fas fa-clock" style="color:#ffc107; width:15px;"></i> 
+                                        Last Active: <?php echo $lastSeen; ?>
+                                    </div>
+                                    <div style="font-size:0.75rem; color:#999; margin-top:8px;">
+                                        Added by: <?php echo htmlspecialchars($s['created_by'] ?? '-'); ?>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="card-icon"><i class="fas fa-user-circle"></i></div>
+                        </a>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+
+            <div class="discount-form-card">
+                <h3 style="color:#003B72; border-bottom:1px solid #eee; padding-bottom:10px; margin-top:0;">
+                    <i class="fas fa-user-plus"></i> Add New Staff
+                </h3>
+
+                <form method="POST" action="?view=stafflogs" autocomplete="off">
+                    <input type="hidden" name="create_staff" value="1">
+
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:15px;">
+                        <div class="input-group-d">
+                            <label>Username</label>
+                            <input type="text" name="new_username" required>
+                        </div>
+
+                        <div class="input-group-d">
+                            <label>Full Name</label>
+                            <input type="text" name="new_full_name" required>
+                        </div>
+
+                        <div class="input-group-d">
+                            <label>Password</label>
+                            <input type="text" name="new_password" required>
+                        </div>
+
+                        <div class="input-group-d">
+                            <label>Assign Location</label>
+                            <select name="assign_location">
+                                <option value="Main Entrance">Main Entrance</option>
+                                <option value="Ticket Booth 1">Ticket Booth 1</option>
+                                <option value="Ticket Booth 2">Ticket Booth 2</option>
+                                <option value="Souvenir Shop">Souvenir Shop</option>
+                                <option value="Admin Office">Admin Office</option>
+                                <option value="Security Gate">Security Gate</option>
+                                <option value="Food Court">Food Court</option>
+                                <option value="General Area">General Area</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn-create" style="margin-top:15px;">
+                        Create Staff
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div id="view-visits" class="tab-content <?php echo $active_tab == 'visits' ? 'active-content' : ''; ?>">
+            
+            <div class="filter-section">
+                <form method="GET" style="display: flex; gap: 20px; align-items: flex-end; flex-wrap: wrap;">
+                    <input type="hidden" name="view" value="visits">
+                    <div class="date-group">
+                        <div class="form-control">
+                            <label>From:</label>
+                            <input type="date" name="h_start" value="<?php echo $hist_start; ?>" required>
+                        </div>
+                        <div class="form-control">
+                            <label>To:</label>
+                            <input type="date" name="h_end" value="<?php echo $hist_end; ?>" required>
+                        </div>
+                        <button type="submit" class="btn-filter"><i class="fas fa-search"></i> Generate Report</button>
+                    </div>
+                </form>
+                
+                <div class="quick-links">
+                    <span style="font-size:0.85rem; font-weight:bold; color:#555;">Presets:</span>
+                    <a href="?view=visits&h_start=<?php echo date('Y-m-d', strtotime('-7 days')); ?>&h_end=<?php echo date('Y-m-d'); ?>">Last 7 Days</a>
+                    <a href="?view=visits&h_start=<?php echo date('Y-m-01'); ?>&h_end=<?php echo date('Y-m-d'); ?>">This Month</a>
+                </div>
+            </div>
+
+            <div class="stats-row">
+                <div class="card" style="border-left: 5px solid #6f42c1;">
+                    <div class="card-info">
+                        <h3><?php echo number_format($histTotalPax); ?></h3>
+                        <p>Total Visitors (In Range)</p>
+                    </div>
+                    <div class="card-icon" style="color:#6f42c1;"><i class="fas fa-walking"></i></div>
+                </div>
+                <div class="card" style="border-left: 5px solid #ffc107;">
+                    <div class="card-info">
+                        <h3 style="font-size:1.4rem;"><?php echo $histBusiestDay['date']; ?></h3>
+                        <p>Busiest Day (<?php echo number_format($histBusiestDay['count']); ?> pax)</p>
+                    </div>
+                    <div class="card-icon" style="color:#ffc107;"><i class="fas fa-trophy"></i></div>
+                </div>
+                <div class="card" style="border-left: 5px solid #17a2b8;">
+                    <div class="card-info">
+                        <h3><?php echo count($histData) > 0 ? round($histTotalPax / count($histData)) : 0; ?></h3>
+                        <p>Avg. Visitors per Day</p>
+                    </div>
+                    <div class="card-icon" style="color:#17a2b8;"><i class="fas fa-chart-bar"></i></div>
+                </div>
+            </div>
+
+            <div class="chart-section">
+                <h3 style="margin-top: 0; color: #003B72; font-size: 1.1rem;">Visitor Traffic Trend</h3>
+                <canvas id="historyChart" height="80"></canvas>
+            </div>
+
+            <div class="table-section">
+                <h3 style="margin-top: 0; color: #003B72; font-size: 1.1rem; margin-bottom: 15px;">Daily Breakdown & Demographics</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th width="20%">Date</th>
+                            <th width="15%">Total Pax</th>
+                            <th>Category Breakdown (Filter)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (!empty($histData)): ?>
+                            <?php foreach ($histData as $date => $data): ?>
+                            <tr>
+                                <td style="font-weight:bold; color:#003B72;">
+                                    <?php echo date("M d, Y (D)", strtotime($date)); ?>
+                                </td>
+                                <td style="font-size:1.2rem; font-weight:800; color:#333;">
+                                    <?php echo number_format($data['total']); ?>
+                                </td>
+                                <td>
+                                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                                        <?php foreach ($data['breakdown'] as $type => $qty): ?>
+                                            <span style="background:#f0f2f5; border:1px solid #ddd; padding:5px 12px; border-radius:20px; font-size:0.85rem;">
+                                                <strong><?php echo htmlspecialchars($type); ?>:</strong> 
+                                                <span style="color:#003B72; font-weight:bold;"><?php echo $qty; ?></span>
+                                            </span>
+                                        <?php endforeach; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr><td colspan="3" style="text-align:center; padding:40px; color:#999;">No records found for this date range. Try changing the dates.</td></tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        function switchTab(tabName) {
+            const url = new URL(window.location);
+            url.searchParams.set('view', tabName);
+            
+            // Clean up URL parameters to keep it tidy
+            url.searchParams.delete('history_id');
+            url.searchParams.delete('addon_history_id');
+            url.searchParams.delete('msg');
+            url.searchParams.delete('error');
+            url.searchParams.delete('s_start');
+            url.searchParams.delete('s_end');
+            url.searchParams.delete('scanner_pid');
+            url.searchParams.delete('staff_id');
+            url.searchParams.delete('st_start');
+            url.searchParams.delete('st_end');
+            url.searchParams.delete('staff_msg');
+            url.searchParams.delete('staff_type');
+            // Don't delete h_start/h_end if on visits tab, but okay to clear if switching away
+            if(tabName !== 'visits') {
+                url.searchParams.delete('h_start');
+                url.searchParams.delete('h_end');
+            }
+
+            window.location.href = url.toString();
+        }
+
+        function searchMembers() {
+            var input = document.getElementById("memberSearchInput");
+            var filter = input.value.toUpperCase(); 
+            var table = document.getElementById("membersTableBody");
+            var tr = table.getElementsByTagName("tr");
+
+            for (var i = 0; i < tr.length; i++) {
+                var rowContent = tr[i].textContent || tr[i].innerText;
+                if (rowContent.toUpperCase().indexOf(filter) > -1) {
+                    tr[i].style.display = ""; 
+                } else {
+                    tr[i].style.display = "none"; 
+                }
+            }
+        }
+
+        function searchStaffCards() {
+            const input = document.getElementById("staffSearchInput");
+            const q = (input.value || "").toUpperCase();
+            const wrap = document.getElementById("staffCardsWrap");
+            if(!wrap) return;
+
+            wrap.querySelectorAll("a.card").forEach(card => {
+                const txt = (card.textContent || "").toUpperCase();
+                card.style.display = txt.includes(q) ? "" : "none";
+            });
+        }
+
+        // Auto-refresh dashboard every 60 seconds to update live count
+        setTimeout(function(){
+           // Optional: Check if user is typing to avoid refresh while searching
+           if(document.activeElement.tagName !== "INPUT") {
+               window.location.reload();
+           }
+        }, 60000);
+
+        // --- CHARTS CONFIGURATION ---
+
+        // 1. Sales Chart (Only load if on Sales Tab)
+        <?php if($active_tab == 'sales'): ?>
+        const ctxSales = document.getElementById('salesChart').getContext('2d');
+        const salesChart = new Chart(ctxSales, {
+            type: 'line',
+            data: {
+                labels: <?php echo json_encode($labels); ?>,
+                datasets: [{
+                    label: 'Revenue (AED)',
+                    data: <?php echo json_encode($dataPoints); ?>,
+                    borderColor: '#003B72',
+                    backgroundColor: 'rgba(0, 59, 114, 0.05)',
+                    borderWidth: 2,
+                    pointBackgroundColor: '#003B72',
+                    pointRadius: 4,
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, grid: { color: '#f0f0f0' } },
+                    x: { grid: { display: false } }
+                }
+            }
+        });
+        <?php endif; ?>
+
+        // 2. Visitor History Chart (Only load if on Visits Tab)
+        <?php if($active_tab == 'visits'): ?>
+        const ctxHist = document.getElementById('historyChart').getContext('2d');
+        const historyChart = new Chart(ctxHist, {
+            type: 'bar', 
+            data: {
+                labels: <?php echo json_encode($histLabels); ?>,
+                datasets: [{
+                    label: 'Total Visitors',
+                    data: <?php echo json_encode($histCounts); ?>,
+                    backgroundColor: 'rgba(111, 66, 193, 0.7)', 
+                    borderColor: '#6f42c1',
+                    borderWidth: 1,
+                    borderRadius: 5
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: { 
+                    y: { beginAtZero: true, grid: { color: '#f0f0f0' } },
+                    x: { grid: { display: false } }
+                }
+            }
+        });
+        <?php endif; ?>
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ajman Waterpark Booking</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --primary-blue: #003366; /* Dark Blue */
+            --accent-blue: #008CBA;  /* Light Blue icons */
+            --bg-color: #f0f4f8;
+            --card-bg: #ffffff;
+            --text-gray: #555;
+            --border-radius: 20px;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            margin: 0;
+            padding: 40px;
+            display: flex;
+            justify-content: center;
+            padding-bottom: 100px; /* Space for the bottom total bar */
+        }
+
+        /* MAIN LAYOUT WRAPPER */
+        .booking-container {
+            display: flex;
+            flex-wrap: wrap; 
+            gap: 30px;
+            max-width: 1200px;
+            width: 100%;
+            align-items: flex-start; 
+        }
+
+        /* --- LEFT SIDE (Product & Add Ons) --- */
+        .left-column {
+            flex: 2; 
+            min-width: 300px;
+        }
+
+        /* TICKET CARD */
+        .card {
+            background: var(--card-bg);
+            border-radius: var(--border-radius);
+            padding: 25px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+            margin-bottom: 30px;
+        }
+
+        .ticket-main {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .ticket-img {
+            width: 200px;
+            height: 150px;
+            border-radius: 15px;
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+
+        .ticket-info h2 {
+            color: var(--primary-blue);
+            margin: 0 0 10px 0;
+            font-size: 1.5rem;
+        }
+
+        .ticket-info p {
+            color: var(--text-gray);
+            font-size: 0.9rem;
+            line-height: 1.5;
+            margin: 5px 0;
+        }
+
+        /* QUANTITY SELECTORS */
+        .pricing-section {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top: 1px solid #eee;
+            padding-top: 20px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .price-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .price-label strong {
+            display: block;
+            color: var(--primary-blue);
+            font-size: 1.1rem;
+        }
+        .price-label span {
+            font-size: 0.75rem;
+            color: #888;
+        }
+
+        .counter-box {
+            display: flex;
+            align-items: center;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 50px;
+            padding: 5px;
+        }
+
+        .counter-btn {
+            background: none;
+            border: none;
+            font-size: 1.2rem;
+            color: var(--primary-blue);
+            cursor: pointer;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .counter-value {
+            font-weight: bold;
+            min-width: 20px;
+            text-align: center;
+        }
+
+        /* --- ADD ONS SECTION --- */
+        .section-title {
+            color: var(--primary-blue);
+            margin-bottom: 15px;
+            font-weight: 700;
+            font-size: 1.2rem;
+        }
+
+        .upgrades-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .upgrade-card {
+            background: white;
+            border-radius: var(--border-radius);
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.03);
+            border: 2px solid transparent; 
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+            display: block; 
+            user-select: none;
+        }
+
+        .addon-checkbox {
+            position: absolute;
+            opacity: 0;
+            cursor: pointer;
+            height: 0;
+            width: 0;
+        }
+
+        .upgrade-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+        }
+
+        /* Selected State */
+        .upgrade-card:has(.addon-checkbox:checked) {
+            border-color: var(--primary-blue);
+            background-color: #eef7fc;
+        }
+
+        .upgrade-icons {
+            font-size: 2rem;
+            color: var(--accent-blue);
+            margin-bottom: 10px;
+        }
+
+        .upgrade-card h4 {
+            margin: 10px 0 5px 0;
+            color: var(--primary-blue);
+        }
+
+        .addon-desc {
+            font-size: 0.8rem; 
+            color: #777;
+            margin: 0 0 10px 0;
+        }
+
+        .upgrade-price {
+            color: var(--primary-blue);
+            font-weight: bold;
+            display: block;
+            margin-top: 5px;
+        }
+
+        /* --- RIGHT SIDE (Calendar) --- */
+        .right-column {
+            flex: 1; 
+            min-width: 300px;
+            position: sticky;
+            top: 20px; 
+            height: fit-content;
+        }
+
+        .calendar-card {
+            background: white;
+            border-radius: var(--border-radius);
+            padding: 25px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+        }
+
+        .calendar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            color: var(--primary-blue);
+            font-weight: bold;
+        }
+
+        .cal-nav {
+            cursor: pointer;
+            color: var(--accent-blue);
+        }
+
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            text-align: center;
+            gap: 10px;
+        }
+
+        .day-name {
+            color: var(--primary-blue);
+            font-weight: bold;
+            font-size: 0.8rem;
+            margin-bottom: 10px;
+        }
+
+        .cal-date {
+            color: #ccc;
+            padding: 10px 0;
+            font-size: 0.9rem;
+        }
+
+        .cal-date.active {
+            color: #555;
+            cursor: pointer;
+            border-radius: 10px;
+            transition: 0.2s;
+        }
+
+        .cal-date.active:hover {
+            background-color: #f0f8ff;
+            color: var(--primary-blue);
+            font-weight: bold;
+        }
+
+        .cal-date.selected {
+            background-color: var(--primary-blue);
+            color: white;
+        }
+
+        /* --- TOTAL BAR (FIXED BOTTOM) --- */
+        .total-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: white;
+            padding: 20px 40px;
+            box-shadow: 0 -5px 20px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 1000;
+            box-sizing: border-box; /* Ensures padding doesn't break width */
+        }
+
+        .total-text {
+            font-size: 0.9rem;
+            color: #777;
+            display: block;
+        }
+
+        .total-price {
+            font-size: 1.8rem;
+            color: var(--primary-blue);
+            font-weight: bold;
+        }
+
+        .book-btn {
+            background-color: var(--primary-blue);
+            color: white;
+            padding: 15px 50px;
+            border-radius: 50px;
+            border: none;
+            font-size: 1.1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        .book-btn:hover {
+            background-color: #004080;
+            transform: scale(1.02);
+        }
+
+        /* Responsive Mobile */
+        @media (max-width: 768px) {
+            .ticket-main { flex-direction: column; }
+            .ticket-img { width: 100%; height: 200px; }
+            .upgrades-grid { grid-template-columns: 1fr; }
+            .pricing-section { flex-direction: column; align-items: stretch; }
+            .total-bar { flex-direction: column; gap: 15px; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="booking-container">
+    
+    <div class="left-column">
+        
+        <div class="card">
+            <div class="ticket-main">
+                <img src="https://via.placeholder.com/300x200?text=Ajman+Water+Park" alt="Waterpark" class="ticket-img">
+                <div class="ticket-info">
+                    <h2>Full Day Access Pass <i class="fa fa-info-circle" style="font-size: 1rem; color: #aaa;"></i></h2>
+                    <p>Your ultimate waterpark experience starts here. Exciting rides and endless fun await!</p>
+                    <p>Unlimited access for kids and adults all day.</p>
+                </div>
+            </div>
+
+            <div class="pricing-section">
+                <div class="price-item">
+                    <div class="price-label">
+                        <strong>AED 95</strong>
+                        <span>Adult (Full Day)</span>
+                    </div>
+                    <div class="counter-box">
+                        <button class="counter-btn" onclick="updateTicket('adult', -1)">-</button>
+                        <span id="qty-adult" class="counter-value">0</span>
+                        <button class="counter-btn" onclick="updateTicket('adult', 1)">+</button>
+                    </div>
+                </div>
+
+                <div class="price-item">
+                    <div class="price-label">
+                        <strong>AED 78.75</strong>
+                        <span>Child (Below 1.1m)</span>
+                    </div>
+                    <div class="counter-box">
+                        <button class="counter-btn" onclick="updateTicket('child', -1)">-</button>
+                        <span id="qty-child" class="counter-value">0</span>
+                        <button class="counter-btn" onclick="updateTicket('child', 1)">+</button>
+                    </div>
+                </div>
+                
+                <div class="price-item">
+                    <div class="price-label">
+                        <strong>Free</strong>
+                        <span>Infant (0+)</span>
+                    </div>
+                    <div class="counter-box">
+                        <button class="counter-btn" onclick="updateTicket('infant', -1)">-</button>
+                        <span id="qty-infant" class="counter-value">0</span>
+                        <button class="counter-btn" onclick="updateTicket('infant', 1)">+</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <h3 class="section-title">Add Ons</h3>
+        <div class="upgrades-grid">
+            
+            <label class="upgrade-card">
+                <input type="checkbox" class="addon-checkbox" value="30" onchange="calculateTotal()">
+                <div class="upgrade-content">
+                    <div class="upgrade-icons">
+                        <i class="fas fa-parking"></i>
+                    </div>
+                    <h4>VIP Parking</h4>
+                    <p class="addon-desc">Secure spot near gate</p>
+                    <span class="upgrade-price">AED 30</span>
+                </div>
+            </label>
+
+            <label class="upgrade-card">
+                <input type="checkbox" class="addon-checkbox" value="45" onchange="calculateTotal()">
+                <div class="upgrade-content">
+                    <div class="upgrade-icons">
+                        <i class="fas fa-wind"></i>
+                    </div>
+                    <h4>Zipline</h4>
+                    <p class="addon-desc">Thrilling ride!</p>
+                    <span class="upgrade-price">AED 45</span>
+                </div>
+            </label>
+
+            <label class="upgrade-card">
+                <input type="checkbox" class="addon-checkbox" value="20" onchange="calculateTotal()">
+                <div class="upgrade-content">
+                    <div class="upgrade-icons">
+                        <i class="fas fa-lock"></i>
+                    </div>
+                    <h4>Locker</h4>
+                    <p class="addon-desc">Keep valuables safe</p>
+                    <span class="upgrade-price">AED 20</span>
+                </div>
+            </label>
+
+            <label class="upgrade-card">
+                <input type="checkbox" class="addon-checkbox" value="25" onchange="calculateTotal()">
+                <div class="upgrade-content">
+                    <div class="upgrade-icons">
+                        <i class="fas fa-bridge-water"></i>
+                    </div>
+                    <h4>Hanging Bridge</h4>
+                    <p class="addon-desc">Scenic walk above pools</p>
+                    <span class="upgrade-price">AED 25</span>
+                </div>
+            </label>
+
+            <label class="upgrade-card">
+                <input type="checkbox" class="addon-checkbox" value="60" onchange="calculateTotal()">
+                <div class="upgrade-content">
+                    <div class="upgrade-icons">
+                        <i class="fas fa-camera"></i>
+                    </div>
+                    <h4>Photography</h4>
+                    <p class="addon-desc">Capture memories</p>
+                    <span class="upgrade-price">AED 60</span>
+                </div>
+            </label>
+
+        </div>
+        
+        <div style="height: 50px;"></div> </div>
+
+    <div class="right-column">
+        <div class="calendar-card">
+            <div class="calendar-header">
+                <i class="fas fa-chevron-left cal-nav"></i>
+                <span>January 2026</span>
+                <i class="fas fa-chevron-right cal-nav"></i>
+            </div>
+            
+            <div class="calendar-grid">
+                <div class="day-name">MO</div><div class="day-name">TU</div><div class="day-name">WE</div>
+                <div class="day-name">TH</div><div class="day-name">FR</div><div class="day-name">SA</div><div class="day-name">SU</div>
+
+                <div class="cal-date"></div><div class="cal-date"></div><div class="cal-date"></div> 
+                <div class="cal-date">1</div><div class="cal-date">2</div><div class="cal-date">3</div><div class="cal-date">4</div>
+                <div class="cal-date active">5</div><div class="cal-date active">6</div><div class="cal-date active">7</div>
+                <div class="cal-date active">8</div><div class="cal-date active">9</div><div class="cal-date active">10</div><div class="cal-date active">11</div>
+                <div class="cal-date active">12</div><div class="cal-date active">13</div><div class="cal-date active">14</div>
+                <div class="cal-date active">15</div><div class="cal-date active">16</div><div class="cal-date active">17</div><div class="cal-date active">18</div>
+                <div class="cal-date active">19</div><div class="cal-date active">20</div><div class="cal-date active">21</div>
+                <div class="cal-date active selected">22</div> <div class="cal-date active">23</div><div class="cal-date active">24</div><div class="cal-date active">25</div>
+                <div class="cal-date active">26</div><div class="cal-date active">27</div><div class="cal-date active">28</div>
+                <div class="cal-date active">29</div><div class="cal-date active">30</div><div class="cal-date active">31</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="total-bar">
+    <div>
+        <span class="total-text">Total Price</span>
+        <span class="total-price" id="total-display">AED 0.00</span>
+    </div>
+    <button class="book-btn">Proceed to Payment</button>
+</div>
+
+<script>
+    // Configuration of Prices
+    const prices = {
+        adult: 95.00,
+        child: 78.75,
+        infant: 0
+    };
+
+    // Keep track of counts
+    let counts = {
+        adult: 0,
+        child: 0,
+        infant: 0
+    };
+
+    // Function to handle +/- buttons
+    function updateTicket(type, change) {
+        counts[type] += change;
+        if(counts[type] < 0) counts[type] = 0; // Prevent negative numbers
+        
+        // Update the number shown in the box
+        document.getElementById(`qty-${type}`).innerText = counts[type];
+        
+        // Recalculate the grand total
+        calculateTotal();
+    }
+
+    // Function to calculate Total Price
+    function calculateTotal() {
+        let total = 0;
+
+        // 1. Calculate Ticket Costs
+        total += (counts.adult * prices.adult);
+        total += (counts.child * prices.child);
+        // Infant is free, so no math needed
+
+        // 2. Calculate Add-ons (Checkboxes)
+        const checkboxes = document.querySelectorAll('.addon-checkbox:checked');
+        checkboxes.forEach(box => {
+            total += parseFloat(box.value);
+        });
+
+        // 3. Update the Total Display at the bottom
+        document.getElementById('total-display').innerText = 'AED ' + total.toFixed(2);
+    }
+</script>
+
+</body>
+</html>
