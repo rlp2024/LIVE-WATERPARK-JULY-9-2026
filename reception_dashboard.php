@@ -1,6 +1,41 @@
 <?php
 session_start();
 include_once 'db_connect.php';
+
+// =========================================================
+// FAST-PATH: AJAX PAYMENT SPLIT UPDATE (dapat MABILIS)
+// Tinatawag ito kaagad ng "Confirm Payment" pagkatapos ng
+// update_payment.php success. Hinahandle dito AGAD bago pa tumakbo ang
+// auto-void UPDATE, password check, at mabibigat na includes -- iyon ang
+// dahilan ng matagal na "PROCESSING..." spinner dati.
+// =========================================================
+if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'update_payment_split') {
+    header('Content-Type: application/json');
+    if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
+        echo json_encode(['status' => 'error', 'message' => 'Not authorized']);
+        exit;
+    }
+    $booking_id = (int)($_GET['booking_id'] ?? 0);
+    $cash = (float)($_GET['cash'] ?? 0);
+    $card = (float)($_GET['card'] ?? 0);
+
+    $final_method = 'Cash';
+    if ($cash > 0 && $card > 0) {
+        $final_method = "Cash: " . number_format($cash, 2) . " | Card: " . number_format($card, 2);
+    } elseif ($card > 0 && $cash == 0) {
+        $final_method = "Card";
+    }
+
+    try {
+        $stmt = $pdo->prepare("UPDATE bookings SET payment_method = ? WHERE booking_id = ?");
+        $stmt->execute([$final_method, $booking_id]);
+        echo json_encode(['status' => 'success']);
+    } catch (Exception $e) {
+        echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+
 include_once 'admin_audit.php';
 
 // =========================================================
@@ -9,12 +44,12 @@ include_once 'admin_audit.php';
 try {
     date_default_timezone_set('Asia/Dubai');
     $voidThreshold = date('Y-m-d H:i:s', strtotime('-30 minutes'));
-    
+
     $stmtVoid = $pdo->prepare("
-        UPDATE bookings 
-        SET payment_status = 'failed' 
+        UPDATE bookings
+        SET payment_status = 'failed'
         WHERE (payment_method IN ('pay_at_counter', 'cash') OR payment_method IS NULL)
-        AND payment_status = 'pending' 
+        AND payment_status = 'pending'
         AND created_at <= ?
     ");
     $stmtVoid->execute([$voidThreshold]);
@@ -73,31 +108,8 @@ if ($role === 'boss' || $role === 'salesmanager') {
 // =========================================================
 // PART 0: AJAX FETCH QR WALLET HISTORY
 // =========================================================
-// =========================================================
-// NEW AJAX ACTION: SECURE DETAILED PAYMENT SPLIT METHOD
-// =========================================================
-if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'update_payment_split') {
-    header('Content-Type: application/json');
-    $booking_id = (int)$_GET['booking_id'];
-    $cash = (float)$_GET['cash'];
-    $card = (float)$_GET['card'];
-    
-    $final_method = 'Cash';
-    if ($cash > 0 && $card > 0) {
-        $final_method = "Cash: " . number_format($cash, 2) . " | Card: " . number_format($card, 2);
-    } elseif ($card > 0 && $cash == 0) {
-        $final_method = "Card";
-    }
-
-    try {
-        $stmt = $pdo->prepare("UPDATE bookings SET payment_method = ? WHERE booking_id = ?");
-        $stmt->execute([$final_method, $booking_id]);
-        echo json_encode(['status' => 'success']);
-    } catch (Exception $e) {
-        echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
-    }
-    exit;
-}
+// NOTE: Ang update_payment_split ay ini-handle na sa itaas (fast-path)
+// bago pa tumakbo ang mabibigat na init tulad ng auto-void.
 if (isset($_GET['ajax_action']) && $_GET['ajax_action'] === 'get_qr_history') {
     $wallet_id = (int)$_GET['wallet_id'];
     

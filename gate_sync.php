@@ -444,7 +444,8 @@ function gate_post(array $payload): array {
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
         CURLOPT_POSTFIELDS     => json_encode($payload),
-        CURLOPT_TIMEOUT        => 20,
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_TIMEOUT        => 6,
         CURLOPT_SSL_VERIFYPEER => GATE_VERIFY_SSL,
         CURLOPT_SSL_VERIFYHOST => GATE_VERIFY_SSL ? 2 : 0,
     ]);
